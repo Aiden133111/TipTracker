@@ -34,7 +34,7 @@ class TipTracker:
 		'''
 	#Off deck type name as str OffDeckType.OFF_DECK
 
-	def __init__(self, ctx : protocol_api.ProtocolContext, pipette1 : protocol_api.InstrumentContext, pipette2 : protocol_api.InstrumentContext, waste_bin : protocol_api.WasteChute | protocol_api.TrashBin, use_gripper : bool = False, debugging : bool = False):
+	def __init__(self, ctx : protocol_api.ProtocolContext, pipette1 : protocol_api.InstrumentContext, pipette2 : protocol_api.InstrumentContext, waste_bin : protocol_api.WasteChute | protocol_api.TrashBin, use_gripper : bool = False, debugging : bool = False, suppress_comments : bool = False):
 
 		self.ctx : protocol_api.ProtocolContext = ctx													#ProtocolContext
 		self.debug : bool = debugging																	#Debugging mode flag
@@ -57,6 +57,7 @@ class TipTracker:
 		self.carousel_tips : bool = False if type(waste_bin) == protocol_api.WasteChute else True		#Carosuel tips if no waste chute
 		self.pick_up_count : dict[protocol_api.InstrumentContext : int] = {pipette1 : 0, pipette2 : 0} 	#How many time pick up tip has been called for each pipette
 		self.drop_count : dict[protocol_api.InstrumentContext : int] = {pipette1 : 0, pipette2 : 0}		#How many time drop tip has been called for each pipette
+		self.print_comments : bool = not suppress_comments 												#If True, will print comments to the protocol log
 
 
 	def assign_slots(self, tiprack1 : str, slots1 : str | list[str], tiprack2 : str = None,slots2 : list[str] | str = None, tiprack3 : str = None, slots3 : str | list[str] = None):
@@ -122,7 +123,7 @@ class TipTracker:
 		refill_all = bool, if True will refill all other empty racks with tips when out of the needed tip, if False will only refill the assigned tipracks that are out
 		
 		Returns Integer corresponding to the following:
-		0 - Pickup, succesful pickup, no swap needed
+		0 - Just Pickup, succesful pickup, no swap needed
 		1 - Had to carosuel to pickup tip
 		2 - Wasted Tip, Grabbed from expansion
 		3 - Wasted Tip, Grabbed from stacker
@@ -149,7 +150,8 @@ class TipTracker:
 			pip.pick_up_tip(locus)
 			return 0
 		except OutOfTipsError:
-			self.ctx.comment('Out of tips, starting refilling process')
+			if self.print_comments:
+				self.ctx.comment('Out of tips, starting refilling process')
 			if self.debug:
 				print('Out of tips, starting refilling process')
 			#Trash old tips
@@ -158,11 +160,13 @@ class TipTracker:
 					if self.ctx.deck[slot] != None and self.ctx.deck[slot].load_name == rack_name:
 						self.waste_tips(slot)
 			#If out of tips and no expansions, refill tips of the same size
-			self.ctx.comment('Out of tips, starting refilling process')
+			if self.print_comments:
+				self.ctx.comment('Out of tips, starting refilling process')
 			if self.debug:
 				print('Out of tips, starting refilling process')
 			if self.ex_slots == None and self._using_stackers == False:
-				self.ctx.comment('No expansion slots defined, Refilling Manually') # Dont have to worry about carousel here, no ex slots
+				if self.print_comments:
+					self.ctx.comment('No expansion slots defined, Refilling Manually') # Dont have to worry about carousel here, no ex slots
 				if self.debug:
 					print('No expansion slots defined, Refilling Manually')
 				self.refill_tips(rack_name,old_rack_slots)
@@ -171,7 +175,8 @@ class TipTracker:
 				self.assign_tipracks(pipette,rack_name)
 				#Optionally refill all used tip racks, dont think this counts expansion deck slots
 				if refill_all:
-					self.ctx.comment('Refilling all other tips')
+					if self.print_comments:
+						self.ctx.comment('Refilling all other tips')
 					if self.debug:
 						print('Refilling all other tips')
 					for other_rack_names,other_slots in other_rack_slots.items():
@@ -183,12 +188,14 @@ class TipTracker:
 							self.refill_tips(other_rack_names,other_slots + empty_tip_slots[other_rack_names])
 				pip.pick_up_tip(locus)
 				return 4
-			else:				
-				self.ctx.comment('Expansion slots or stackers defined, starting refilling process')
+			else:
+				if self.print_comments:			
+					self.ctx.comment('Expansion slots or stackers defined, starting refilling process')
 				if self.debug:
 					print('Expansion slots defined, starting refilling process')
 				if refill_all:
-					self.ctx.comment('Refilling all other tips')
+					if self.print_comments:
+						self.ctx.comment('Refilling all other tips')
 					if self.debug:
 						print('Refilling all other tips')
 					for other_rack_names,other_slots in other_rack_slots.items():
@@ -199,7 +206,8 @@ class TipTracker:
 							self.ctx.pause(f"Please place {other_rack_names} onto slots {other_slots + empty_tip_slots[other_rack_names]}")
 							self.refill_tips(other_rack_names,other_slots + empty_tip_slots[other_rack_names])
 				if rack_name in self.ex_racks.keys() and self.ex_racks[rack_name] != []:
-					self.ctx.comment('Tiprack on expansion slot, moving to active deck')
+					if self.print_comments:
+						self.ctx.comment('Tiprack on expansion slot, moving to active deck')
 					if self.debug:
 						print('Tiprack on expansion slot, moving to active deck')
 					if self.carousel_tips:
@@ -221,7 +229,8 @@ class TipTracker:
 					pip.pick_up_tip(locus)
 					return return_code
 				elif rack_name in self.stackers.keys() and self.stackers[rack_name][1] > 0:
-					self.ctx.comment('Tiprack in stacker, moving to active deck')
+					if self.print_comments:
+						self.ctx.comment('Tiprack in stacker, moving to active deck')
 					if self.debug:
 						print('Tiprack in stacker, moving to active deck')
 					next_rack = self.move_from_stacker(rack_name)
@@ -232,11 +241,13 @@ class TipTracker:
 					return 3
 				else:
 					if self.ex_racks:
-						self.ctx.comment('No remaining tipracks on expansion deck, manual refill needed')
+						if self.print_comments:
+							self.ctx.comment('No remaining tipracks on expansion deck, manual refill needed')
 						if self.debug:
 							print('No remaining tipracks on expansion deck, manual refill needed')
 					elif self._using_stackers:
-						self.ctx.comment('No remaining tipracks in stackers, manual refill needed')
+						if self.print_comments:
+							self.ctx.comment('No remaining tipracks in stackers, manual refill needed')
 						if self.debug:
 							print('No remaining tipracks in stackers, manual refill needed')
 						self.stackers[rack_name].fill(count=7)
@@ -346,11 +357,13 @@ class TipTracker:
 		old_racks = list of tiprack labware objects to replace, can be a list of labware or a single labware object
 		new_rack_name = str of the new tiprack load name
 		number_to_replace = int of how many to replace, if None will replace all of that type'''
-		self.ctx.comment(f'Replacing {number_to_replace} {old_rack_name} with {new_rack_name}')
+		if self.print_comments:
+			self.ctx.comment(f'Replacing {number_to_replace} {old_rack_name} with {new_rack_name}')
 		if self.debug:
 			print('Replacing {number_to_replace} {old_rack_name} with {new_rack_name}')
 		slot_list = self.rack_assignments[old_rack_name][:number_to_replace]
-		self.ctx.comment('Replacing tipracks')
+		if self.print_comments:
+			self.ctx.comment('Replacing tipracks')
 		if self.debug:
 			print('Replacing Tipracks')
 		self.ctx.home()
@@ -368,7 +381,8 @@ class TipTracker:
 		Can call this method manually instead of calling clear_old load_tipracks independently. \
 		name = tiprack load name as str
 		slots = list of slots to refill, if str or labware will be converted to list. Labware should be passed only if it is a tiprack adapter'''
-		self.ctx.comment(f'Refilling tips of {name} on {slots}')
+		if self.print_comments:
+			self.ctx.comment(f'Refilling tips of {name} on {slots}')
 		if self.debug:
 			print(f'Refilling tips of {name} on {slots}')
 		self.clear_old(name)
@@ -378,7 +392,8 @@ class TipTracker:
 		'''Move tipboxes to waste, this is done automatically when a all types of a tip are used or when refill_all=True for tip pickup but can be used to manually move tips from any slots to waste. \
 		If called manually, make sure to use clear_old on the slots after to remove it from internal data \
 		slots = list of slots to move to waste, if str or labware will be converted to list. Labware should be passed only if it is a tiprack adapter'''
-		self.ctx.comment(f'Wasting tips on slots {slots}: Using gripper : {self.use_gripper}')
+		if self.print_comments:
+			self.ctx.comment(f'Wasting tips on slots {slots}: Using gripper : {self.use_gripper}')
 		if self.debug:
 			print(f'Wasting tips on slots {slots}: Using gripper : {self.use_gripper}')
 		if type(slots) == str or type(slots) == protocol_api.Labware:
@@ -395,7 +410,8 @@ class TipTracker:
 		Instead of pip.tip_racks = [tipracks], use trackerObj.assign_tipracks(1,opentrons_flex_96_filtertip_50ul).\
 		pipette = 1 or 2, corresponding to which order you loaded them in
 		name = tiprack load name as str'''
-		self.ctx.comment(f'Reassigning tipracks of {pipette} to {name}')
+		if self.print_comments:
+			self.ctx.comment(f'Reassigning tipracks of {pipette} to {name}')
 		if self.debug:
 			print(f'Reassigning tipracks of {pipette} to {name}')
 		pip = self.pipette1 if pipette in (1,'1',self.pipette1,'one','One') else self.pipette2 if pipette in (2,'2',self.pipette2,'two','Two') else None
@@ -408,11 +424,13 @@ class TipTracker:
 		Only use if you are sure you want to remove the tipracks from the internal data without moving them off deck physically. Keeps protocol from trying to move labware not on the deck anymore
 		name = Tiprack load name
 		slots_to_clear = List of slots to clear, if None will clear all tipracks of that type'''
-		self.ctx.comment(f'Clearing old tipracks of {name}')
+		if self.print_comments:
+			self.ctx.comment(f'Clearing old tipracks of {name}')
 		if self.debug:
 			print(f'Clearing old tipracks of {name}')
 		if save_tips == False and self.use_chute == True and self.use_gripper == True:
-			self.ctx.comment('Using Gripper to remove tips')
+			if self.print_comments:
+				self.ctx.comment('Using Gripper to remove tips')
 			if self.debug:
 				print('Using Gripper to remove tips')
 			toss_tips = True
