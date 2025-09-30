@@ -17,10 +17,10 @@ requirements = {
 #########################
 '''
 FEATURES TO IMPLEMENT
-1. Add tiprack limits for each type of tip 
-2. Edge case for error recovery on last available tip
-3. Add the starting tip for tiptracking, dont use these tips for, can span multiple tipracks
-4. Tiprack cutoff for use
+1. Edge case for error recovery on last available tip
+2. Add the starting tip for tiptracking, dont use these tips for, can span multiple tipracks
+
+BUGS
 '''
 ##########################
 class TipTracker:
@@ -42,7 +42,7 @@ class TipTracker:
 		self.debug : bool = debugging																	#Debugging mode flag
 		self.pipette1 : protocol_api.InstrumentContext = pipette1										#First pipette
 		self.pipette2 : protocol_api.InstrumentContext | None = pipette2								#Second Pipette
-		self.ex_slots : list[str] | None = None															#If using expansion slots
+		self.ex_slots : list[str] = []															#If using expansion slots
 		self.use_gripper : bool = use_gripper															#If using gripper
 		self.waste : protocol_api.WasteChute | protocol_api.TrashBin = waste_bin						#The waste bin type to use
 		self.tipracks : dict[protocol_api.Labware.load_name : list[str]] = {}							#Active deck tiprack tracker, internal strings are deck slots
@@ -218,9 +218,20 @@ class TipTracker:
 					if self.debug:
 						print('Tiprack on expansion slot, moving to active deck')
 					if self.carousel_tips:
+						swap = False
 						for old_rack,e_rack in zip(self.tipracks[rack_name],self.ex_racks[rack_name]):
-							self.carousel(old_rack,e_rack)
-							return_code = 1
+							if all([well.has_tip for well in e_rack.wells()]):
+								self.carousel(old_rack,e_rack)
+								return_code = 1
+								swap = True
+						if swap == False:
+							if self.print_comments:
+								self.ctx.comment('No Tipracks on Expansion Slots have tips, beginning refill process')
+							if self.debug:
+								print('No Tipracks on Expansion Slots have tips, beginning refill process')
+							self.refill_tips(rack_name,self.rack_assignments[rack_name])
+						return_code = 4
+
 					else:
 						for e_rack, open_slot in zip(self.ex_racks[rack_name],waste_slots): #This needs a check for if expansion slot has tips 
 							e_slot_source = e_rack.parent
@@ -447,7 +458,7 @@ class TipTracker:
 			raise ValueError(f"Invalid pipette number {pipette}, must be 1 or 2")
 		pip.tip_racks = self.tipracks[name]
 
-	def clear_old(self,name : str ,slots_to_clear : None | list = None,save_tips = True):
+	def clear_old(self,name : str ,slots_to_clear : None | list = None,save_tips = True, waste_expansion : bool = False):
 		'''Remove old tipracks from internal data to replace with new tipracks in another function. This should generally only be used internally.\
 		Only use if you are sure you want to remove the tipracks from the internal data without moving them off deck physically. Keeps protocol from trying to move labware not on the deck anymore
 		name = Tiprack load name
@@ -470,7 +481,7 @@ class TipTracker:
 			toss_location = protocol_api.OFF_DECK
 		if slots_to_clear == None:
 			if name in self.rack_assignments.keys():
-				for rack in self.tipracks[name]:
+				for rack in self.tipracks.get(name,[]):
 					self.ctx._core.move_labware(
 						labware_core=rack._core,
 						new_location=toss_location,
@@ -479,6 +490,15 @@ class TipTracker:
 						pick_up_offset=(0.0,0.0,0.0),
 						drop_offset=(0.0,0.0,0.0))
 				self.tipracks[name] = []
+				for rack in self.ex_racks.get(name,[]):
+					self.ctx._core.move_labware(
+						labware_core=rack._core,
+						new_location=toss_location,
+						use_gripper=toss_tips,
+						pause_for_manual_move=False,
+						pick_up_offset=(0.0,0.0,0.0),
+						drop_offset=(0.0,0.0,0.0))
+				self.ex_racks[name] = []
 			else:
 				raise KeyError(f"Tiprack {name} not found in tiprack list")
 		else:
