@@ -87,8 +87,38 @@ Stackers
 			pipette = single_50,
 			return_tip = True)
 ```
-Thats the basics! Keep assigning tips as necessary and the protocol will automatically move tipracks around as needed and also pause if it doesn't have enough. You can print the tip rack usage for your protocol with the following. You can use this to limit the protocol from loading more tipracks of a certain type than needed (will cause OutOfTips error if you improperly limit the amount of tipracks)
+### Setting Max rack limits 
+By default the tracker will refill all tip slots for a given racktype when it runs out, but this becomes problematic if we only need one or two more tipracks close to the end of the run. As developers we must understand how many tips a protocol is going to use since this protocol uses the load-as-you-go method. We determine the amount of tips we use during a particular protocol using the 
+
 ```
-	ctx.comment(f'{TrackObject.tip_counts}')
-	ctx.comment(f'{TrackObject.tip_rack_counts}')
+TrackObject.tip_count = {rackName : int for rackname in self.tipracks} # Amount of tips pickedup
+TrackObject.tip_rack_count = {rackName : int for rackname in self.tipracks} #Amount of tipracks loaded 
 ```
+by printing the tip_count property after a protocol using `ProtocolContext.comment(f'{TrackObject.tip_count}')` and celing divding all counts by 12 you can find the amount of tips used in a given simulation. Note the tip_rack_count property has no ceiling at this point so it may no be the same as the calculated integer 
+
+We can set the max counts by doing the following
+```
+TrackObject.max_rack_count[rackName] = int
+```
+
+### Troubleshooting
+When setting up our protocol we may want to track what the tracker is doing when protocols are failing or we may or may not want the protocol to print comments to the user about its actions. We can do the following with a couple of arguments when defining the TrackerObject
+
+```
+TrackerObject = TipTracker(
+		protocol_context=ctx,
+		pipette1=single_50, 
+		pipette2=multi_50,
+		waste_bin=chute,
+		use_gripper=use_gripper = True,
+		debugging=True,
+		suppress_comments=True
+)
+```
+
+Setting debugging to True will print its actions as print commands and is useful for checking to make sure the right pipette is being used at a given time or the deck is resetting when you expect it (uses `print()` commands). Setting suppress_comments to True will remove the those same comments from being displayed to the user during RunTime.
+
+You can also `print(TrackerObject.pick_up_tip())` to see what was needed for a given tip pick up. Right now this returns an integer corresponding to the motions needed to pick up the tip.
+
+
+Thats the basics! Keep assigning tips as necessary and the protocol will automatically move tipracks around as needed and also pause if it doesn't have enough. 
