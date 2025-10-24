@@ -170,6 +170,7 @@ class TipTracker:
 				for slot in waste_slots:
 					if self.ctx.deck[slot] != None and self.ctx.deck[slot].load_name == rack_name:
 						self.waste_tips(slot)
+						empty_tip_slots[rack_name].append(slot)
 			#If out of tips and no expansions, refill tips of the same size
 			if self.ex_slots == None and self._using_stackers == False:
 				if self.print_comments:
@@ -246,12 +247,13 @@ class TipTracker:
 					
 					pip.pick_up_tip(locus)
 				elif rack_name in self.stackers.keys() and self.stackers[rack_name][1] > 0:
-					if self.print_comments:
-						self.ctx.comment('Tiprack in stacker, moving to active deck')
-					if self.debug:
-						print('Tiprack in stacker, moving to active deck')
-					next_rack = self.move_from_stacker(rack_name)
-					self._shuttle_labware(next_rack,empty_tip_slots[rack_name])
+					for slot, rack in zip(empty_tip_slots[rack_name],range(self.stackers[rack_name][1])):
+						if self.print_comments:
+							self.ctx.comment('Tiprack in stacker, moving to active deck')
+						if self.debug:
+							print('Tiprack in stacker, moving to active deck')
+						next_rack = self.move_from_stacker(rack_name)
+						self._shuttle_labware(next_rack,slot)
 					self.reset_rack_list(rack_name)
 					self.assign_tipracks(pipette,rack_name)
 					pipette.pick_up_tip(locus)
@@ -576,14 +578,19 @@ class TipTracker:
 	def move_from_stacker(self,rackname,):
 		stacker = self.stackers[rackname][0]
 		self.stackers[rackname][1] = self.stackers[rackname][1] - 1 #Change Quantity of stacker
-		labware = stacker.retreive()
-		if labware.child != None: #Throw away lid 
-			self.ctx.move_labware(labware.child,self.waste,use_gripper=self.use_gripper)
+		labware : protocol_api.Labware = stacker.retrieve()
+		try:
+			self.ctx.move_lid(labware,self.waste,use_gripper=self.use_gripper)
+		except ValueError as e:
+			if str(e) == 'Cannot move a lid off of Opentrons Flex 96 Tip Rack 50 µL because it has no lid.':
+				pass
+			else:
+				raise ValueError(str(e))
 		return labware
 
-	def load_tips_in_stacker(self,stacker,rackname,quantity,lid : bool = False):
+	def load_tips_in_stacker(self,stacker : protocol_api.FlexStackerContext,rackname : str,quantity : int,lid : str | None = None):
 		self._using_stackers == True
-		stacker.set_stored_labware(load_name=rackname,count=quantity,lid=lid)
+		stacker.set_stored_labware(rackname,count=quantity,lid=lid)
 		if rackname not in self.tip_rack_counts.keys():
 			self.tip_rack_counts[rackname] = quantity
 		else:
