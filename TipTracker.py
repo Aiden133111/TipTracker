@@ -12,7 +12,7 @@ metadata = {
 
 requirements = {
 	"robotType": "Flex",
-	"apiLevel": "2.22",
+	"apiLevel": "2.25",
 }
 #########################
 '''
@@ -21,6 +21,7 @@ FEATURES TO IMPLEMENT
 2. Add the starting tip for tiptracking, dont use these tips for, can span multiple tipracks
 
 BUGS
+1. If a slot was considered ignored, it would still be put into waste slots (and then tips would try to be shuttled there, SlotOccupiedError) FIX IMPLEMENTED NEEDS COMMIT
 '''
 ##########################
 class TipTracker:
@@ -157,10 +158,26 @@ class TipTracker:
 		if self.open_slot != None and self.original_open_slot == None:
 			self.original_open_slot = self.open_slot
 		#Try and pick up tip
-		try:	
+		
+		#IF this rack should only be on the slot
+		if rack_name in self.pick_up_slots.keys():
+			#Check if tiprack has tips first
+			next_tip = self.ctx.deck[self.pick_up_slots[rack_name]].next_tip()
+			if next_tip == None:
+				if self.debug:
+					print(f'No Tips availalble for pickup on slot {self.pick_up_slots[rack_name]}, shuffling tipracks')
+				if self.print_comments:
+					self.ctx.comment(f'No Tips availalble for pickup on slot {self.pick_up_slots[rack_name]}, shuffling tipracks')
+				try:
+					self.shuffle_for_forced_pickup(rack_name,self.pick_up_slots[rack_name], pip)
+				except UnboundLocalError as e:
+					pass
+
+		try:
 			pip.pick_up_tip(locus)
 			return_code =  0
-		except OutOfTipsError:
+		except Exception:
+			print('Active Channels',pip.active_channels)
 			if self.print_comments:
 				self.ctx.comment('Out of tips, starting refilling process')
 			if self.debug:
@@ -218,20 +235,9 @@ class TipTracker:
 					if self.debug:
 						print('Tiprack on expansion slot, moving to active deck')
 					if self.carousel_tips:
-						swap = False
 						for old_rack,e_rack in zip(self.tipracks[rack_name],self.ex_racks[rack_name]):
-							if all([well.has_tip for well in e_rack.wells()]):
-								self.carousel(old_rack,e_rack)
-								return_code = 1
-								swap = True
-						if swap == False:
-							if self.print_comments:
-								self.ctx.comment('No Tipracks on Expansion Slots have tips, beginning refill process')
-							if self.debug:
-								print('No Tipracks on Expansion Slots have tips, beginning refill process')
-							self.refill_tips(rack_name,self.rack_assignments[rack_name])
-						return_code = 4
-
+							self.carousel(old_rack,e_rack)
+							return_code = 1
 					else:
 						for e_rack, open_slot in zip(self.ex_racks[rack_name],waste_slots): #This needs a check for if expansion slot has tips 
 							e_slot_source = e_rack.parent
@@ -274,7 +280,6 @@ class TipTracker:
 					self.reset_rack_list(rack_name)
 					self.assign_tipracks(pipette,rack_name)
 					self.open_slot = self.original_open_slot
-
 					pip.pick_up_tip(locus)
 					return_code =  4
 					
@@ -285,6 +290,29 @@ class TipTracker:
 		else:
 			self.tip_counts[rack_name] = pip.active_channels
 		return return_code
+	
+	def shuffle_for_forced_pickup(self, rack_name : str, pick_up_slot : str, pipette : protocol_api.InstrumentContext):
+		#TO DO, FIND NEXT TIPRACK with TIPS, MOVE OLD RACK AWAY, NEXT RACK IN
+		empty_rack = self.ctx.deck[pick_up_slot]
+		for slot in self.rack_assignments[rack_name]:
+			print(slot)
+			if slot == pick_up_slot or self.ctx.deck[slot] == None:
+				continue
+			elif self.ctx.deck[slot]:
+				next_rack = self.ctx.deck[slot]
+		if self.carousel_tips:
+			self.carousel(empty_rack,next_rack)
+			self.reset_rack_list(rack_name)
+			self.assign_tipracks(pipette,rack_name)
+		elif self.use_chute:
+			if self.print_comments:
+				self.ctx.comment(f'Disposing of empty tiprack in {pick_up_slot} replacing with {next_rack.parent}')
+			if self.debug:
+				print(f'Disposing of empty tiprack in {pick_up_slot} replacing with {next_rack.parent}')
+			self.ctx.move_labware(empty_rack,self.waste,use_gripper=self.use_gripper)
+			self.ctx.move_labware(next_rack,self.pick_up_slots[rack_name],use_gripper=self.use_gripper)
+			self.reset_rack_list(rack_name)
+			self.assign_tipracks(pipette,rack_name)
 
 	def add_starting_tipracks(self, tiprack1 : str, slots1 : str | list[str], tiprack2 : str = None,slots2 : list[str] | str = None, tiprack3 : str = None, slots3 : str | list[str] = None, max_racks_1 : int = None, max_racks_2 : int = None, max_racks_3 : int = None):
 		'''Load tipracks onto the deck and assign the proper slots to reload them onto. This method should always be used to the first set of tipracks just to ensure they properly \
@@ -576,18 +604,37 @@ class TipTracker:
 	def move_from_stacker(self,rackname,):
 		stacker = self.stackers[rackname][0]
 		self.stackers[rackname][1] = self.stackers[rackname][1] - 1 #Change Quantity of stacker
-		labware = stacker.retreive()
-		if labware.child != None: #Throw away lid 
-			self.ctx.move_labware(labware.child,self.waste,use_gripper=self.use_gripper)
+		if not stacker.child:
+			labware : protocol_api.Labware = stacker.retrieve()
+		else:
+			labware = stacker.child #If there is a tiprack on the stacker
+		try: #This should be changes, internal flag for lid
+			self.ctx.move_lid(labware,self.waste,use_gripper=self.use_gripper)
+		except ValueError as e:
+			if str(e) in ['Cannot move a lid off of Opentrons Flex 96 Tip Rack 50 µL because it has no lid.',]:
+				pass
+			else:
+				raise ValueError(str(e))
 		return labware
+	
+	def add_stacker(self, slot, rackname, initial_count, lid, load_on_carridge):
+		self._using_stackers = True
+		if self.print_comments:
+			self.ctx.comment(f'Adding stacker module on slot {slot} with {initial_count} {rackname}')
+		if self.debug:
+			print(f'Adding stacker module on slot {slot} with {initial_count} {rackname}')
+		stacker_obj = self.ctx.load_module('flexStackerModuleV1', slot)
+		self.load_tips_in_stacker(stacker_obj,rackname,initial_count,lid,load_on_carridge)
+		return stacker_obj
 
-	def load_tips_in_stacker(self,stacker,rackname,quantity,lid : bool = False):
-		self._using_stackers == True
-		stacker.set_stored_labware(load_name=rackname,count=quantity,lid=lid)
+	def load_tips_in_stacker(self,stacker : protocol_api.FlexStackerContext,rackname : str,quantity : int,lid : str | None = None, load_on_carridge : bool = True):
+		stacker.set_stored_labware(rackname,count=quantity - 1 if load_on_carridge else quantity,lid=lid)
 		if rackname not in self.tip_rack_counts.keys():
 			self.tip_rack_counts[rackname] = quantity
 		else:
 			self.tip_rack_counts[rackname] = self.tip_rack_counts[rackname] + quantity
+		if load_on_carridge:
+			stacker.load_labware(rackname)
 		self.stackers[rackname] = [stacker,quantity]
 
 	def _shuttle_labware(self,labware,location):
