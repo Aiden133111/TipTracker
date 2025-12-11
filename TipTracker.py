@@ -43,7 +43,7 @@ class TipTracker:
 		self.debug : bool = debugging																	#Debugging mode flag
 		self.pipette1 : protocol_api.InstrumentContext = pipette1										#First pipette
 		self.pipette2 : protocol_api.InstrumentContext | None = pipette2								#Second Pipette
-		self.ex_slots : list[str] = []															#If using expansion slots
+		self.ex_slots : list[str] | None = []															#If using expansion slots
 		self.use_gripper : bool = use_gripper															#If using gripper
 		self.waste : protocol_api.WasteChute | protocol_api.TrashBin = waste_bin						#The waste bin type to use
 		self.tipracks : dict[protocol_api.Labware.load_name : list[str]] = {}							#Active deck tiprack tracker, internal strings are deck slots
@@ -63,6 +63,7 @@ class TipTracker:
 		self.print_comments : bool = not suppress_comments 												#If True, will print comments to the protocol log
 		self.max_racks_count : dict = {}
 		self.ignore_slots : list[str] = []
+		self.pick_up_slots = {}
 
 
 	def assign_slots(self, tiprack1 : str, slots1 : str | list[str], tiprack2 : str = None,slots2 : list[str] | str = None, tiprack3 : str = None, slots3 : str | list[str] = None):
