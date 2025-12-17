@@ -55,12 +55,11 @@ Expansion Slots
 ```
 Stackers
 ```
-	stacker = ctx.load_stacker() #WIP
-	TrackObject.load_tips_in_stacker(
-		stacker=stacker,
-		rack_name='opentrons_flex_filtertips_1000ul',
-		quantity=6,
-		lid=True)
+Tracker_obj.add_stacker(slot='D4',
+                        rackname=TIPS_200,
+                        initial_count=7,
+                        lid='opentrons_flex_tiprack_lid',
+						load_on_carridge=True)
 ```
 3. Load Tips on deck. Add up to 3 types of tipracks at a time with a corresponding list of what slots they should be in
 ```
