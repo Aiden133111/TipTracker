@@ -12,7 +12,7 @@ metadata = {
 
 requirements = {
 	"robotType": "Flex",
-	"apiLevel": "2.26",
+	"apiLevel": "2.27",
 }
 #########################
 '''
@@ -20,87 +20,223 @@ FEATURES TO IMPLEMENT
 0. Stacker refill and expansion slot / regular deck are filled independently (will ask for manual refill when all tips out but only one will be refilled) REFILL ALL Available slots 
 1. Edge case for error recovery on last available tip
 2. Add the starting tip for tiptracking, dont use these tips for, can span multiple tipracks
+3. Full rack support
 
 BUGS
-1. If a slot was considered ignored, it would still be put into waste slots (and then tips would try to be shuttled there, SlotOccupiedError) FIX IMPLEMENTED NEEDS COMMIT
+1. Investigate using open_slot for forced tip pickup. After one refill what is open slot redined to
 '''
 ##########################
 class TipTracker:
-	'''Create a tip tracking object to easily facitate how protocols that require many tips should have them added to the deck. \
-		Will pause the protocol to refill tips when empty. Or will move extra tipracks from expansion slots to the active deck when out \
-		Can also dispose of emopty racks through with the gripper and waste chute if both are connected to the robot.
-		Track_object = TipTracker(ctx, pipette1, pipette2, waste_bin, use_gripper=False)
-		ctx = protocol_api.ProtocolContext , your protocol context to access protocol information
-		pipette1 = protocol_api.InstrumentContext , your first pipette
-		pipette2 = protocol_api.InstrumentContext , your second pipette 
-		waste_bin = protocol_api.WasteChute or protocol_api.TrashBin , the waste being used
-		use_gripper = bool, if True will use the gripper to move labware, if False will use the manual method of moving labware off and on deck. \
+	'''
+	The TipTracker class is meant to be a plug-in method to track all tips across the deck and in stackers to facilate seamless \
+	methods of refilling tips when the robot runs out of a given tiprack size wether it be refilling from the expansion slots, \
+	refilling from stackers, or refilling manually. Empty tips can be shuffled around the deck with the carouseling feature \
+	or more commonly thrown away in the waste chute as the main benefit of this class is with higher throughput deck layouts \
+	or expansion slots. The carousel feature is still helpful to prevent developers from having to call move labware multiple times. \
+	The priority of refills is as follows
+	1. If there are tips available in the assigned tiprack slots, pick up from there
+	2. If using pick_up_slots and tiprack is not on correct slot, shuffle from active deck
+	3. Move tiprack from expansion slot to deck or carousel if enabled
+	4. Move tiprack from stacker to deck or carousel if enabled
+	5. Refill manually all tips on all slots up until the max racks are defined 
+	5a. If max racks is defined and being reached in the next fillup, stackers will be asked to be refilled instead of the deck.
+	5b. If no max racks defined then all slots assigned to the tiprack are refilled
+	5c. If refill all is used all empty tipracks will be prompted to replaced instead of just the current tiprack type. 
+	
+	:param self: TipTracker object
+	:param ctx: Your protocol context to access protocol information and move labware around the deck
+	:type ctx: protocol_api.ProtocolContext
+	:param pipette1: Your first pipette, used to track tips for the first pipette and assign tipracks to it
+	:type pipette1: protocol_api.InstrumentContext
+	:param pipette2: Your second pipette, used to track tips for the second pipette and assign tipracks to it, or None
+	:type pipette2: protocol_api.InstrumentContext | None
+	:param waste_bin: The waste bin being used, can be a waste chute or a trash bin, if waste chute is used, will use it to dispose of empty racks and tips, if trash bin is used, will prompt user to move empty racks to waste after all racks are empty
+	:type waste_bin: protocol_api.WasteChute | protocol_api.TrashBin
+	:param use_gripper: IF you have the gripper, highly recommended for using TipTracker or else its all manual
+	:type use_gripper: bool
+	:param debugging: To print commands to the terminal which is useful for troubleshooting and understanding the flow of the tip tracker, but can be verbose
+	:type debugging: bool
+	:param suppress_comments: To suppress comments of the tracker to the protocol log, which is useful if you don't want to increase the number of steps in the run log, identical output as debugging
+	:type suppress_comments: bool
+	'''
+
+	def __init__(self, ctx : protocol_api.ProtocolContext, pipette1 : protocol_api.InstrumentContext, 
+				waste_bin : protocol_api.WasteChute | protocol_api.TrashBin, pipette2 : protocol_api.InstrumentContext | None = None,
+				use_gripper : bool = False, debugging : bool = False, suppress_comments : bool = False) -> None:
 		'''
-	#Off deck type name as str OffDeckType.OFF_DECK
+		Initilizes the creation of the TipTracker object, sets all properties to default values, creates dictionaries to track tipracks on the deck and in expansion slots \
+		and assigns the pipettes and waste bin to the object. Sets default priorites for how empty racks should be handled. THIS IS NOT TO BE CALLED DIRECTLY. Each internal \
+		property is explained in the comments below in read only sections (never meant to be modified directly) and read/write sections (sections are meant to be  \
+		modifed directly in some / all situtaions. \
+		
+		:param self: TipTracker object
+		:param ctx: Your protocol context to access protocol information and move labware around the deck
+		:type ctx: protocol_api.ProtocolContext
+		:param pipette1: Your first pipette, used to track tips for the first pipette and assign tipracks to it
+		:type pipette1: protocol_api.InstrumentContext
+		:param waste_bin: The waste bin being used, can be a waste chute or a trash bin, if waste chute is used, will use it to dispose of empty racks and tips, if trash bin is used, will prompt user to move empty racks to waste after all racks are empty
+		:type waste_bin: protocol_api.WasteChute | protocol_api.TrashBin
+		:param use_gripper: IF you have the gripper, highly recommended for using TipTracker or else its all manual
+		:type use_gripper: bool
+		:param pipette2: Your second pipette, used to track tips for the second pipette and assign tipracks to it, or None
+		:type pipette2: protocol_api.InstrumentContext | None
+		:param debugging: To print commands to the terminal which is useful for troubleshooting and understanding the flow of the tip tracker, but can be verbose
+		:type debugging: bool
+		:param suppress_comments: To suppress comments of the tracker to the protocol log, which is useful if you don't want to increase the number of steps in the run log, identical output as debugging
+		:type suppress_comments: bool
+		'''
 
-	def __init__(self, ctx : protocol_api.ProtocolContext, pipette1 : protocol_api.InstrumentContext, pipette2 : protocol_api.InstrumentContext, waste_bin : protocol_api.WasteChute | protocol_api.TrashBin, use_gripper : bool = False, debugging : bool = False, suppress_comments : bool = False):
+		self.metadata = {
+			'Author': 'Aiden McFadden',
+			'Version' : '2.0',
+			'github': 'https://github.com/Aiden133111/TipTracker',
+			'README' : 'https://github.com/Aiden133111/TipTracker/blob/main/README.md'
+		}
 
-		self.ctx : protocol_api.ProtocolContext = ctx													#ProtocolContext
-		self.debug : bool = debugging																	#Debugging mode flag
-		self.pipette1 : protocol_api.InstrumentContext = pipette1										#First pipette
-		self.pipette2 : protocol_api.InstrumentContext | None = pipette2								#Second Pipette
-		self.ex_slots : list[str] | None = []															#If using expansion slots
-		self.use_gripper : bool = use_gripper															#If using gripper
-		self.waste : protocol_api.WasteChute | protocol_api.TrashBin = waste_bin						#The waste bin type to use
-		self.tipracks : dict[protocol_api.Labware.load_name : list[str]] = {}							#Active deck tiprack tracker, internal strings are deck slots
-		self.ex_racks : dict[protocol_api.Labware.load_name : list[str]] = {}							#Expansion slots tiprack tracker
-		self.empty_ex_slots : dict[protocol_api.Labware.load_name : list[str]] = {}						#Dictionary of empty expansion slots that previously had tips
-		self.rack_assignments : dict[protocol_api.Labware.load_name : list[str]] = {}					#Dictionary map of where tipracks should be loaded
-		self.tip_counts : dict[protocol_api.Labware.load_name : int] = {}								#Dictionary of # of used tips for each rack type 
-		self.tip_rack_counts : dict[protocol_api.Labware.load_name : int] = {}							#Dictionary of tipracks loaded for each rack type
-		self.open_slot : str | None = None																#Slot with nothing on it, placeholder slot for carousel
-		self.original_open_slot : str | None = None														#Origional open_slot for carousel
-		self.stackers : dict[protocol_api.Labware.load_name : list[protocol_api.ModuleContext,int,bool]] = {}#Dictionary of stacker instrument context and number of racks in the stacker, key is rack load name
-		self.use_chute : bool = True if type(waste_bin) == protocol_api.WasteChute else False			#Use waste chute to dispose of tips if present 
-		self.carousel_tips : bool = False if type(waste_bin) == protocol_api.WasteChute else True		#Carousel tips if no waste chute
-		self.pick_up_count : dict[protocol_api.InstrumentContext : int] = {pipette1 : 0, pipette2 : 0} 	#How many time pick up tip has been called for each pipette
-		self.drop_count : dict[protocol_api.InstrumentContext : int] = {pipette1 : 0, pipette2 : 0}		#How many time drop tip has been called for each pipette
-		self.print_comments : bool = not suppress_comments 												#If True, will print comments to the protocol log
-		self.max_racks_count : dict = {}
+		#######################################################
+		# READ ONLY THROUGHOUT PROTOCOL, USER DOES NOT MODIFY #
+		#######################################################
+
+		#ProtocolContext for robot commands. Read only and passed through init.
+		self.ctx : protocol_api.ProtocolContext = ctx
+		#First pipette added to the tracker via init, do not change or call property mid protocol, completely fine to only have one pipette and leave pipette2 as None. Read Only											
+		self.pipette1 : protocol_api.InstrumentContext = pipette1										
+		#Second Pipette added to the tracker via init, do not change or call property mid protocol, can be left as None if only using one pipette, but if using two pipettes add it during init. Read Only
+		self.pipette2 : protocol_api.InstrumentContext | None = pipette2
+		#The expansion slots that have been added to the tracker. This can be set directly but using add_expansion_slots() is recommended to ensure the internal data is correct, 
+		#can be updated mid protocol as needed if expansion slots are added or removed during the run. Read Only
+		self.ex_slots : list[str] = []	
+		#How many times a pipette has been called to pick up any tip, Read only
+		self.pick_up_count : dict[protocol_api.InstrumentContext : int] = {pipette1 : 0, pipette2 : 0}
+		#How many times a pieptte has been called to drop any tip, Read only
+		self.drop_count : dict[protocol_api.InstrumentContext : int] = {pipette1 : 0, pipette2 : 0}
+		#If using the gripper to move racks, highly recommended to only use this package with the gripper or else everything is manual. Set via init Read Only													
+		self.use_gripper : bool = use_gripper					
+		#The type of waste bin that you are using for the protocol. Waste chute is highly recommended as it allows for more automation and less manual steps, but the tracker can work with a trash bin as well,
+		#just with more manual steps. Set via init Read Only
+		self.waste : protocol_api.WasteChute | protocol_api.TrashBin = waste_bin
+		#Dictionary of tipracks to track on the deck. This should not be directly modified as it is updated directly through the tracker functions, but can be read to see what tipracks are currently on the deck.
+		#Key is the tiprack load name, value is a list of the tiprack labware objects on the deck of that type. Read Only
+		self.tipracks : dict[protocol_api.Labware.load_name : list[str]] = {}
+		#Dictionary of tipracks to track on the expansion slots of the robot. This should not be directly modified as it is updated directly through the tracker functions, but can be read to see what tipracks 
+		#are currently on the expansion slots. Key is the tiprack load name, value is a list of the tiprack labware objects on the expansion slots of that type. Where they currently are, not to be user modified
+		# Read Only
+		self.ex_racks : dict[protocol_api.Labware.load_name : list[str]] = {}
+		#Empty expansion slots that previously had racks on them, used to priortize where racks should be moved from the expansion slots back to the deck when they need to be refilled, key is the 
+		#tiprack load name, value is a list of the expansion slot names that previously had racks on them of that type. Not to be directly modified, updated through the tracker functions. Read Only
+		self.empty_ex_slots : dict[protocol_api.Labware.load_name : list[str]] = {}	
+		#Dictionary map of where tipracks should be refilled when that tiptype is empty. This can be different than where tipracks currently are. This can be modified by calling assign_slots() and not
+		#by calling directly. Read Only
+		self.rack_assignments : dict[protocol_api.Labware.load_name : list[str]] = {}	
+		#How many tips have been used for that given tiprack type. Uses pipette.active_nozzles to count. This is read only
+		self.tip_counts : dict[protocol_api.Labware.load_name : int] = {}
+		#How many tipracks have been loaded for that given tiprack type. This is read only
+		self.tip_rack_counts : dict[protocol_api.Labware.load_name : int] = {}
+		#Origional open slot for carousel that is saved when open_slot is first defined. Used for resetting when plate map is reset. Read only
+		self.original_open_slot : str | None = None	
+		#Dictionary of stacker instrument contexts and number of racks in the stacker, key is rack load name. Read Only, use add_stacker() to create this dictionary and add the stackers to the tracker
+		self.stackers : dict[protocol_api.Labware.load_name : list[list[protocol_api.ModuleContext,int,bool]]] = {}
+		#If something has been moved from the shuttle and needs to be returned during a tip replacement. Read Only
+		self.return_to_stacker : bool = False		
+
+		##########################################################
+		# READ/WRITE, USER CAN MODIFY AS NEEDED THROUGH PROTOCOL #
+		##########################################################
+
+		#A slot or adapter with nothing on it that the tracker can use to shuffle labware when needed (carousel or stacker shuttle). THis should be set directly when carouseling
+		#Read/Write Okay
+		self.open_slot : str | None = None	
+		#Debugging mode flag from init. Read/Write Okay Changing mid protocol is totally fine if you only want to focus on a certain part													
+		self.debug : bool = debugging	
+		#Use waste chute to dispose of tips and waste chute if present. Only change if you want to keep empty racks on the deck and use carousel to shuffle. Read/Write supported
+		self.use_chute : bool = True if type(waste_bin) == protocol_api.WasteChute else False			 
+		#If tips should be shuffled around the deck using the open slot so that empty racks are kept on the deck instead of thowing away. Read/Write supported
+		self.carousel_tips : bool = False if type(waste_bin) == protocol_api.WasteChute else True
+		#If tracker commands should print to the run log to explain why the robot commands are happening. Set through init but can be changed to highlight certain parts
+		self.print_comments : bool = not suppress_comments
+		#The max racks count for each tiprack type. This will prevent extra racks to be loaded when a defined threshold has been reached. This can be set using add_starting_tiprack or modified by direct call
+		#using the API load name of the tiprack you want to set. Read/Write Okay
+		self.max_racks_count : dict[protocol_api.Labware.load_name : int] = {}
+		#A list of deck slot names that should be ignored by the tracker for throwing away and refill, just keep on deck useful for tip reuse. Read/Write okay ex TipTracker.ignore_slots.append('A3').
 		self.ignore_slots : list[str] = []
-		self.pick_up_slots = {}
-		self.active_pipette = None
+		#A dictionary of tiprack load names and the slots they should only pick up from to force a pickup in a given slot, useful for partial tip pickups.
+		#Read/Write okay Tipracker.pick_up_slots['opentrons_flex_96_tiprack_50ul'] = 'A1'
+		self.pick_up_slots : dict[protocol_api.Labware.load_name : str] = {}
+		#A default pipette that should be used to prevent having to pass pipette repeadily to pickup and drop commannds. Read/Write okay TipTracker.active_pipette = self.pipette1 can also be
+		#set during pick_up commands using the set_active_pipette argument.
+		self.active_pipette = None				
+															
 
-
-	def assign_slots(self, tiprack1 : str, slots1 : str | list[str], tiprack2 : str = None,slots2 : list[str] | str = None, tiprack3 : str = None, slots3 : str | list[str] = None):
-		'''Dedicate slots to a tiprack, this is used as the slots to refill racks on the deck when they are out. \
-			Use this method when the slots you want tips to be reloaded on are different than the slots they started on. \
-			This is currently UNTESTED to reuse during a protocol. Can take three tipracks-slot pairs at once.
-			tiprack1 = str of the tiprack load name,
-			slots1 = list of slots to load tiprack1 onto, can be str or list of strings
-			tiprack2 = str of the tiprack load name,
-			slots2 = list of slots to load tiprack2 onto, can be str or list of strings
-			tiprack3 = str of the tiprack load name,
-			slots3 = list of slots to load tiprack3 onto, can be str or list of strings'''
-		for tiprack,slots in zip([tiprack1, tiprack2, tiprack3],[slots1, slots2, slots3]):
+	def assign_slots(self, tiprack1 : str, slots1 : str | list[str], tiprack2 : str = None, slots2 : list[str] | str = None,
+				   tiprack3 : str = None, slots3 : str | list[str] = None, tiprack4 : str | None = None, slots4 : str | list[str] | None = None) -> None:
+		'''
+		Assign slot(s) to a tiprack type. These are the slots that tipracks should be replaced into and does not need to be the places they are currently in or \
+		where they are origionally loaded in with add_starting_tipracks(). This function can be called as needed to chage where racks should be loaded in any \
+		given parts of the protocol, but is generally not updated much within a normal protocol deck map. Arguments must be passed as tiprack-slot pairs. 
+		
+		:param self: TipTracker object
+		:param tiprack1: The API load name of the first tiprack type to assign slots to, for example 'opentrons_flex_96_tiprack_50ul'
+		:type tiprack1: str
+		:param slots1: The slot(s) to assign to tiprack1, these are the slots that tipracks of this type will be reloaded onto when they are empty, can be a string of a single slot or a list of strings for multiple slots
+		:type slots1: str | list[str]
+		:param tiprack2: The API load name of the second tiprack type to assign slots to, for example 'opentrons_flex_96_tiprack_50ul'
+		:type tiprack2: str
+		:param slots2: The slot(s) to assign to tiprack2, these are the slots that tipracks of this type will be reloaded onto when they are empty, can be a string of a single slot or a list of strings for multiple slots
+		:type slots2: list[str] | str
+		:param tiprack3: The API load name of the third tiprack type to assign slots to, for example 'opentrons_flex_96_tiprack_50ul'
+		:type tiprack3: str
+		:param slots3: The slot(s) to assign to tiprack3, these are the slots that tipracks of this type will be reloaded onto when they are empty, can be a string of a single slot or a list of strings for multiple slots
+		:type slots3: str | list[str]
+		:param tiprack4: The API load name of the fourth tiprack type to assign slots to, for example 'opentrons_flex_96_tiprack_50ul'
+		:type tiprack4: str | None
+		:param slots4: The slot(s) to assign to tiprack4, these are the slots that tipracks of this type will be reloaded onto when they are empty, can be a string of a single slot or a list of strings for multiple slots
+		:type slots4: str | list[str] | None
+		:return: None
+		:rtype: None
+		'''
+		for tiprack,slots in zip([tiprack1, tiprack2, tiprack3, tiprack4],[slots1, slots2, slots3, slots4]):
 			if tiprack == None and slots == None:
 				continue
 			if type(slots) == str:
 				slots = [slots]
 			self.rack_assignments[tiprack] = slots
 
-	def load_tipracks(self, tiprack1 : str, slots1 : str | list[str], tiprack2 : str = None,slots2 : list[str] | str = None, tiprack3 : str = None, slots3 : str | list[str] = None):
-		'''Add tipracks to the deck and to the internal data. This method should always be used to load tipracks onto the deck to change decklayout. \
-			Use starting tipracks to intially load the deck to also assign the same slots to the tipracks\
-			Although it is done manually through the code when more tipracks are needed, it can be used independently to load tipracks onto the deck. \
-			Can take three tipracks-slot pairs at once. This done initially when calling starting_tipracks.
-			tiprack1 = str of the tiprack load name,
-			slots1 = list of slots to load tiprack1 onto, can be str or list of strings
-			tiprack2 = str of the tiprack load name,
-			slots2 = list of slots to load tiprack2 onto, can be str or list of strings
-			tiprack3 = str of the tiprack load name,
-			slots3 = list of slots to load tiprack3 onto, can be str or list of strings'''
-		for slots in [slots1, slots2, slots3]:
+
+	def load_tipracks(self, tiprack1 : str, slots1 : str | list[str], tiprack2 : str = None,slots2 : list[str] | str = None,
+				   tiprack3 : str = None, slots3 : str | list[str] = None,tiprack4 : str | None = None, slots4 : str | list[str] | None = None) -> None:
+		'''
+		Load tipracks to the deck and to the internal data. This method is automatically called when using add_starting_tipracks() and when refilling tips so \
+		this is only needed to use if you want to override that completely and load new tipracks into other slots independently. Note that this \
+		does not pause the protocol and is used to replace ProtocolContext.load_labware(), so do not call this function unless inteneded to not pause \
+		Use starting tipracks to intially load the deck to also assign the same slots to the tipracks instead of calling this directly at the start of the protocol. \
+		Can take four tipracks-slot pairs at once. If the max_racks for that given rack type has been defined and reached, it will not load any more
+		
+		:param self: Description
+		:param tiprack1: Description
+		:type tiprack1: str
+		:param slots1: Description
+		:type slots1: str | list[str]
+		:param tiprack2: Description
+		:type tiprack2: str
+		:param slots2: Description
+		:type slots2: list[str] | str
+		:param tiprack3: Description
+		:type tiprack3: str
+		:param slots3: Description
+		:type slots3: str | list[str]
+		:param tiprack4: Description
+		:type tiprack4: str | None
+		:param slots4: Description
+		:type slots4: str | list[str] | None
+		:return: None
+		:rtype: None
+		'''
+		for slots in [slots1, slots2, slots3, slots4]:
 			if type(slots) == str:
 				slots = [slots]
 
 		#Load labware for each tiprack in each slot
-		for rackname,slots in zip([tiprack1, tiprack2, tiprack3],[slots1, slots2, slots3]):
+		for rackname,slots in zip([tiprack1, tiprack2, tiprack3, tiprack4],[slots1, slots2, slots3, slots4]):
 			if rackname != None:
 				for slot in slots:
 					if self.max_racks_count.get(rackname,None) != None:
@@ -129,19 +265,34 @@ class TipTracker:
 						else:
 							self.tipracks[rackname] = [rack]
 
-	def pick_up(self, pipette : int | str | protocol_api.InstrumentContext | None = None, locus : protocol_api.Labware | protocol_api.Well | None = None, refill_all : bool = False, set_active_pipette : bool = False) -> int:
-		'''Main use of the tracker function. If we run out of tips using this method, instead of an error being thrown it will check for extra racks in expansion slots \
-		or prompt users to phyically refill the tips. It will use the waste chute to throw out the empty tip racks before it needs to refill.
-		pipette = Any of the following (1,'One','one','1') or (2,'2',self.pipette2,'two','Two') to indicate which pipette to use
-		locus = optional Labware or Well to use to pick up tip, for example reuse tips
-		refill_all = bool, if True will refill all other empty racks with tips when out of the needed tip, if False will only refill the assigned tipracks that are out
-		
-		Returns Integer corresponding to the following:
+
+	def pick_up(self, pipette : int | str | protocol_api.InstrumentContext | None = None, 
+			 locus : protocol_api.Labware | protocol_api.Well | None = None, refill_all : bool = False, set_active_pipette : bool = False) -> int:
+		'''
+		The main function and benefit of using the TipTracker class. This function, meant to repalce InsturmentContext.pick_up_tip(), will attempt to \
+		pick up a tip with the specified pipette (or acitive_pipette) for its assigned tiprack. If there is not a tip available, it will find the next tip \
+		available on the deck either on the expansion slots, in a stacker, somewhere else on the deck where pickup should not happen. The function will also \
+		facilitate refills for tipracks if there is no aviailbe tiprack accessable to the robot. A  locus can be used to speificy where the next tip should come from \
+		Turning on refill all will refill all tips if the racks is empty even if there are more tipracks available of that type
+
+		Return Code Definitions:
 		0 - Just Pickup, succesful pickup, no swap needed
 		1 - Had to carousel to pickup tip
 		2 - Wasted Tip, Grabbed from expansion
 		3 - Wasted Tip, Grabbed from stacker
 		4 - Manual Refill started
+		
+		:param self: TipTracker object
+		:param pipette: The pipette that should pick up the tip, if non then its the current active pipette.
+		:type pipette: int | str | protocol_api.InstrumentContext | None
+		:param locus: The well that the pipette should pick the tip up from, if None will pick up from the next available tip in the assigned tiprack, can be used to reuse tips or pick up from a specific rack
+		:type locus: protocol_api.Labware | protocol_api.Well | None
+		:param refill_all: If True refill all tiracks if they are empty when you run out of the tiprack currently assiged to the pipette. If False only the current tiprack will be refilled 
+		:type refill_all: bool
+		:param set_active_pipette: If True set the pipette used to pick up the tip as the active pipette, if False do not change the active pipette, only use the pipette argument for this pick up
+		:type set_active_pipette: bool
+		:return: Return code corresponding to how the pipette was able to pick up tips. See the definitions above for the meaning of each return code
+		:rtype: int
 		'''
 		#Assign proper pipette and check what tips are currently assigned
 		if pipette != None:
@@ -150,8 +301,12 @@ class TipTracker:
 				self.active_pipette = active_pipette
 		elif pipette == None and self.active_pipette != None:
 			active_pipette = self.active_pipette
-		if active_pipette == None and self.active_pipette == None:
+		if active_pipette == None:
 			raise ValueError(f"Invalid pipette: {pipette}, must be in [1,'1',self.pipette1,'one','One'] or [2,'2',self.pipette2,'two','Two']")
+		if pipette != None and self.active_pipette == None:
+			raise ValueError(f"Active pipette not set but no pipette argument was passed, please set active pipette or specify pipette in call")
+		if active_pipette.tip_racks == []:
+			raise ValueError(f"No tipracks assigned to pipette {active_pipette}, please assign tipracks before picking up tips")
 		self.pick_up_count[active_pipette] = self.pick_up_count[active_pipette] + 1
 		#update tiprack list if deck has changed since last pick up
 		rack_name = active_pipette.tip_racks[0].load_name
@@ -201,7 +356,7 @@ class TipTracker:
 				self.refill_tips(rack_name,old_rack_slots)
 				self.ctx.home()
 				self.ctx.pause(f"Please place {rack_name} onto slots {old_rack_slots}")
-				self.assign_tipracks(active_pipette,rack_name)
+				self.assign_tipracks(pipette=active_pipette,rack_name=rack_name)
 				#Optionally refill all used tip racks, dont think this counts expansion deck slots
 				if refill_all:
 					if self.print_comments:
@@ -253,28 +408,44 @@ class TipTracker:
 								self.empty_ex_slots[rack_name] = [e_slot_source]
 							return_code = 2
 					self.reset_rack_list(rack_name)			
-					self.assign_tipracks(active_pipette,rack_name)
+					self.assign_tipracks(pipette=active_pipette,rack_name=rack_name)
 					
 					active_pipette.pick_up_tip(locus)
-				elif rack_name in self.stackers.keys() and self.stackers[rack_name][1] > 0:
+				elif rack_name in self.stackers.keys() and sum([stacker[1] for stacker in self.stackers[rack_name]]) > 0:
 					if not self.carousel_tips:
-						if self.print_comments:
-							self.ctx.comment(f'Tiprack in stacker, moving {min(len(waste_slots),self.stackers[rack_name][1])} rack(s) to active deck')
-						if self.debug:
-							print(f'Tiprack in stacker, moving {min(len(waste_slots),self.stackers[rack_name][1])} rack(s) to active deck')
-						for slot in waste_slots[:self.stackers[rack_name][1]]:
-							next_rack = self.move_from_stacker(rack_name)
-							self._shuttle_labware(next_rack,slot)
+						for slot in waste_slots:
+							for stacker in self.stackers[rack_name]:
+								if stacker[1] > 0:
+									if self.print_comments:
+										self.ctx.comment(f'Tiprack in {stacker[0]}, moving to {slot}')
+									if self.debug:
+										print(f'Tiprack in {stacker[0]}, moving to {slot}')
+									next_rack = self.move_from_stacker(rack_name)
+									self._shuttle_labware(next_rack,slot)
+									break
+								else:
+									if self.print_comments:
+										self.ctx.comment(f'No remaining tipracks in {stacker[0]}')
+									if self.debug:
+										print(f'No remaining tipracks in {stacker[0]}')
 					else:
 						if self.print_comments:
 							self.ctx.comment('Tiprack in stacker, carouseling to active deck')
 						if self.debug:
 							print('Tiprack in stacker, carouseling to active deck')
 						for old_rack in self.tipracks[rack_name]:
-							next_rack = self.move_from_stacker(rack_name)
-							self.carousel(old_rack,next_rack)
+							for stacker in self.stackers[rack_name]:
+								if stacker[1] > 0:
+									next_rack = self.move_from_stacker(rack_name)
+									self.carousel(old_rack,next_rack)
+									break
+								else:
+									if self.print_comments:
+										self.ctx.comment(f'No remaining tipracks in {stacker[0]}')
+									if self.debug:
+										print(f'No remaining tipracks in {stacker[0]}')
 					self.reset_rack_list(rack_name)
-					self.assign_tipracks(active_pipette,rack_name)
+					self.assign_tipracks(pipette=active_pipette,rack_name=rack_name)
 					active_pipette.pick_up_tip(locus)
 					return_code = 3
 				else:
@@ -284,14 +455,15 @@ class TipTracker:
 							self.ctx.comment('No remaining tipracks in stackers, manual refill needed')
 						if self.debug:
 							print('No remaining tipracks in stackers, manual refill needed')
-						count_to_load = 7 if self.max_racks_count.get(rack_name,None) == None else min(7,self.max_racks_count[rack_name]-self.tip_rack_counts.get(rack_name,0))
-						self.stackers[rack_name][1] = count_to_load
-						lid_load_name = 'opentrons_flex_tiprack_lid' if self.stackers[rack_name][2] else None
-						self.load_tips_in_stacker(self.stackers[rack_name][0],rack_name,count_to_load,lid_load_name,True if count_to_load > 6 else False)
-						stacker_message = f'Please load {count_to_load - 1 if count_to_load > 6 else count_to_load} {rack_name} into {self.stackers[rack_name][0]}'
-						if count_to_load > 6:
-							stacker_message = stacker_message + ' and place one on the shuttle'
-						self.ctx.pause(stacker_message)
+						for x,stacker in enumerate(self.stackers[rack_name]):
+							count_to_load = 6 if self.max_racks_count.get(rack_name,None) == None else min(6,self.max_racks_count[rack_name]-self.tip_rack_counts.get(rack_name,0))
+							self.stackers[rack_name][x][1] = count_to_load
+							lid_load_name = 'opentrons_flex_tiprack_lid' if self.stackers[rack_name][x][2] else None
+							self.load_tips_in_stacker(self.stackers[rack_name][x][0],rack_name,count_to_load,lid_load_name,True if count_to_load > 6 else False) #hard coded this to never place on shuttle, revist later to give flexibility
+							stacker_message = f'Please load {count_to_load - 1 if count_to_load > 6 else count_to_load} {rack_name} into {stacker[0]}'
+							if count_to_load > 6:
+								stacker_message = stacker_message + ' and place one on the shuttle'
+							self.ctx.pause(stacker_message)
 						if self.max_racks_count.get(rack_name,None) == self.tip_rack_counts.get(rack_name,-1):
 							call_refill = False
 							if self.print_comments:
@@ -308,31 +480,52 @@ class TipTracker:
 							print('No remaining tipracks on expansion deck, manual refill needed')
 						
 						#CHeck here for empty tipracks on deck
-					
 					self.ctx.home()
 					if call_refill:
 						if old_rack_slots != []:
 							self.ctx.pause(f'Place {rack_name} onto slots {old_rack_slots}')
 						self.refill_tips(rack_name,self.rack_assignments[rack_name])
 					self.reset_rack_list(rack_name)
-					self.assign_tipracks(active_pipette,rack_name)
+					self.assign_tipracks(pipette=active_pipette,rack_name=rack_name)
 					self.open_slot = self.original_open_slot
 					active_pipette.pick_up_tip(locus)
 					return_code =  4
 					
 					#Pause protocol and prompt user to load new tipracks, could we have option to add all tipracks
-
+		if self.return_to_stacker:
+			if self.print_comments:
+				self.ctx.comment('Returning labware to stacker')
+			if self.debug:
+				print('Returning labware to stacker')
+			stacker_origional_labware, holding_slot, rackname, chosen_index  = self.return_to_stacker
+			self._shuttle_labware(stacker_origional_labware,self.stackers[rackname][chosen_index][0])
+			self.return_to_stacker = False
 		if rack_name in self.tip_counts.keys():
 			self.tip_counts[rack_name] = self.tip_counts[rack_name] + active_pipette.active_channels
 		else:
 			self.tip_counts[rack_name] = active_pipette.active_channels
 		return return_code
 	
-	def shuffle_for_forced_pickup(self, rack_name : str, pick_up_slot : str, pipette : protocol_api.InstrumentContext):
+
+	def shuffle_for_forced_pickup(self, rack_name : str, pick_up_slot : str, pipette : protocol_api.InstrumentContext) -> None:
+		'''
+		This function will shuffle labware around the deck to force the next tip pickup for a rack type to be in its pick_up_slot. This function should generally only be used by the tracker itself \
+		when a rack is out of tips and a manual refill is not needed. IF there is a waste chute, the old labware will be thrown away. This function will update interal data after moving labware around the deck. \
+		Forced pickup is most useful for partial tip pickups so that only the speified slots have to have the spacial clearance to allow for the partial tip pickup.
+		
+		:param self: TipTracker object
+		:param rack_name: The API load name of the tiprack type that should be shuffled into the forced pickup slot
+		:type rack_name: str
+		:param pick_up_slot: The old labware slot that should be disposed of or moved away in order to make room for the next tiprack. Which is generally the forced pickup slot for that rack
+		:type pick_up_slot: str
+		:param pipette: The pipette that you are assigning the tiprack to, used to update the tiprack list after shuffling to the force pickup type
+		:type pipette: protocol_api.InstrumentContext
+		:return: None
+		:rtype: None
+		'''
 		#TO DO, FIND NEXT TIPRACK with TIPS, MOVE OLD RACK AWAY, NEXT RACK IN
 		empty_rack = self.ctx.deck[pick_up_slot]
 		for slot in self.rack_assignments[rack_name]:
-			print(slot)
 			if slot == pick_up_slot or self.ctx.deck[slot] == None:
 				continue
 			elif self.ctx.deck[slot]:
@@ -340,7 +533,7 @@ class TipTracker:
 		if self.carousel_tips:
 			self.carousel(empty_rack,next_rack)
 			self.reset_rack_list(rack_name)
-			self.assign_tipracks(pipette,rack_name)
+			self.assign_tipracks(pipette=pipette,rack_name=rack_name)
 		elif self.use_chute:
 			if self.print_comments:
 				self.ctx.comment(f'Disposing of empty tiprack in {pick_up_slot} replacing with {next_rack.parent}')
@@ -349,19 +542,50 @@ class TipTracker:
 			self.ctx.move_labware(empty_rack,self.waste,use_gripper=self.use_gripper)
 			self.ctx.move_labware(next_rack,self.pick_up_slots[rack_name],use_gripper=self.use_gripper)
 			self.reset_rack_list(rack_name)
-			self.assign_tipracks(pipette,rack_name)
+			self.assign_tipracks(pipette=pipette,rack_name=rack_name)
 
-	def add_starting_tipracks(self, tiprack1 : str, slots1 : str | list[str], tiprack2 : str = None,slots2 : list[str] | str = None, tiprack3 : str = None, slots3 : str | list[str] = None, max_racks_1 : int = None, max_racks_2 : int = None, max_racks_3 : int = None):
-		'''Load tipracks onto the deck and assign the proper slots to reload them onto. This method should always be used to the first set of tipracks just to ensure they properly \
-			match, but these variables could be different. i.e. you do not want the tipracks to be refilled onto the same slots as they start on. Can take three tipracks-slot pairs at once.
-			tiprack1 = str of the tiprack load name,
-			slots1 = list of slots to load tiprack1 onto, can be str or list of strings
-			tiprack2 = str of the tiprack load name,
-			slots2 = list of slots to load tiprack2 onto, can be str or list of strings
-			tiprack3 = str of the tiprack load name,
-			slots3 = list of slots to load tiprack3 onto, can be str or list of strings'''
-		assign_slots = [slots1, slots2, slots3]
-		tipracks = [tiprack1, tiprack2, tiprack3]
+	def add_starting_tipracks(self, tiprack1 : str, slots1 : str | list[str],
+						   	tiprack2 : str = None,slots2 : list[str] | str = None,
+							tiprack3 : str = None, slots3 : str | list[str] = None,
+							tiprack4 : str = None, slots4 : str | list[str] = None,
+							max_racks_1 : int = None, max_racks_2 : int = None,
+							max_racks_3 : int = None, max_racks_4 : int = None) -> None:
+		'''
+		Load tipracks as a replacement for ProtocolContext.load_labware() for all tipracks and slots that you want to use at the beginning of the protocol. \
+		This function will also assign the given slots for each tiprack as the slots to reload the tipracks onto, but this can be changed with assign_slots if needed. \
+		Although this function only takes 4 tiprack-slot pairs, it can be used multiple times to load more tipracks or assign more slots. Four racks were chosen since \
+		it is unlikely that one would use both filtertips and non filtertips at the same time, but is technically allowed by the tracker and are treated seperately since they \
+		have different API load names. The maximum racks of each type can be added here to prevent excess reloading of tipracks. The number of racks can be left as None for no limit. \
+		The amount of raks can be foudn by print TipTracker,tip_counts and tip_rack_counts after a run to see how many racks were used and how many tips were used from each rack type.
+		
+		:param self: TipTracker object
+		:param tiprack1: The API load name of the first tiprack to load onto the deck, i.e. 'opentrons_flex_96_tiprack_50ul'
+		:type tiprack1: str
+		:param slots1: The slot or list of slots to load tiprack1 onto, i.e. 'A1' or ['A1','B1','C1','D1']
+		:type slots1: str | list[str]
+		:param tiprack2: The API load name of the second tiprack to load onto the deck, i.e. 'opentrons_flex_96_tiprack_50ul'
+		:type tiprack2: str
+		:param slots2: The slot or list of slots to load tiprack2 onto, i.e. 'A2' or ['A2','B2','C2','D2']
+		:type slots2: list[str] | str
+		:param tiprack3: The API load name of the third tiprack to load onto the deck, i.e. 'opentrons_flex_96_tiprack_50ul'
+		:type tiprack3: str
+		:param slots3: The slot or list of slots to load tiprack3 onto, i.e. 'A3' or ['A3','B3','C3','D3']
+		:type slots3: str | list[str]
+		:param tiprack4: The API load name of the fourth tiprack to load onto the deck, i.e. 'opentrons_flex_96_tiprack_50ul'
+		:type tiprack4: str
+		:param slots4: The slot or list of slots to load tiprack4 onto, i.e. 'A4' or ['A4','B4','C4','D4']
+		:type slots4: str | list[str]
+		:param max_racks_1: The maxium amount of tipracks of type tiprack1 that should be loaded onto the deck, if None there is no limit. This prevents reloading all slots when only one more would be needed
+		:type max_racks_1: int
+		:param max_racks_2: The maxium amount of tipracks of type tiprack2 that should be loaded onto the deck, if None there is no limit. This prevents reloading all slots when only one more would be needed
+		:type max_racks_2: int
+		:param max_racks_3: The maxium amount of tipracks of type tiprack3 that should be loaded onto the deck, if None there is no limit. This prevents reloading all slots when only one more would be needed
+		:type max_racks_3: int
+		:param max_racks_4: The maxium amount of tipracks of type tiprack4 that should be loaded onto the deck, if None there is no limit. This prevents reloading all slots when only one more would be needed
+		:type max_racks_4: int
+		'''
+		assign_slots = [slots1, slots2, slots3, slots4]
+		tipracks = [tiprack1, tiprack2, tiprack3, tiprack4]
 		for slot, rack in zip(assign_slots,tipracks):
 			if slot != None and rack != None:
 				continue
@@ -370,41 +594,65 @@ class TipTracker:
 			else:
 				raise ValueError(f"Tiprack {rack} and slots {slot} must be defined together")
 			
-		for max_rack,tiprack in zip([max_racks_1, max_racks_2, max_racks_3],tipracks):
+		for max_rack,tiprack in zip([max_racks_1, max_racks_2, max_racks_3, max_racks_4],tipracks):
 			if max_rack != None and type(max_rack) != int:
 				raise TypeError(f"Max racks must be an integer, got {type(max_rack)}")
 			else:
 				if max_rack != None:
 					self.max_racks_count[tiprack] = max_rack
-		self.load_tipracks(tiprack1,slots1,tiprack2,slots2,tiprack3,slots3)
-		self.assign_slots(tiprack1,slots1,tiprack2,slots2,tiprack3,slots3)
+		self.load_tipracks(tiprack1,slots1,tiprack2,slots2,tiprack3,slots3,tiprack4,slots4)
+		self.assign_slots(tiprack1,slots1,tiprack2,slots2,tiprack3,slots3,tiprack4,slots4)
 
-	def reset_rack_list(self,rack_name):
-		'''Fetches a rackname and resets its internal data for the type of rack. Can be useful when you move the deck around with the gripper, \
-		place new racks on the deck or even perform manual moves of labware 
-		rack_name = str of the rack load name to reset, i.e. opentrons_flex_96_tiprack_50ul'''
-		rack_list = []
-		ex_list = []
-		for slot,item in self.ctx.deck.items(): 
-			if not item or item in self.ctx.loaded_modules.values():
-				continue
-			if item.load_name == 'opentrons_flex_96_tiprack_adapter':
-				rack_obj = item.child
-			else:
-				rack_obj = item
-			if rack_obj.load_name == rack_name:
-				if slot in self.ex_slots:
-					ex_list.append(rack_obj)
+
+	def reset_rack_list(self,rack_names : str | list[str] | None) -> None:
+		'''
+		Resets the internal data of the tracker for a given rack name or multiple rack names. This should be called after moving anything offdeck or on deck to prevent unaccessable tipracks from \
+		being assigned to the pipettes. This essentially prevents "LabwareOffDeckError" by updating internal data to match the current deck state. This should be called after \
+		any manual moves of tipracks or changes to the deck layout pertaining to any of the slots assigned to tipracks, but is generally not needed to be called directly. \
+		If NoneType is passed, then all rack types in the internal data will be reset. This function does not reassign current slots to rack assignments. 
+		
+		:param self: TipTracker object
+		:param rack_names: The API load name(s) of the rack(s) to reset, i.e. opentrons_flex_96_tiprack_50ul if None resets all rack types in internal data
+		:type rack_names: str | list[str] | None
+		:return: None
+		:rtype: None
+		'''
+		if type(rack_names) == str:
+			rack_names = [rack_names]
+		elif type(rack_names) == None:
+			rack_names = list(set(list(self.tipracks.keys()) + list(self.ex_racks.keys())))
+		for rack_name in rack_names:
+			rack_list = []
+			ex_list = []
+			for slot,item in self.ctx.deck.items(): 
+				#Skip things that are modules or tiprack adapters
+				if not item or item in self.ctx.loaded_modules.values():
+					continue
+				if item.load_name == 'opentrons_flex_96_tiprack_adapter':
+					continue
 				else:
-					rack_list.append(rack_obj)
-		self.tipracks[rack_name] = rack_list
-		self.ex_racks[rack_name] = ex_list
+					rack_obj = item
+				if rack_obj.load_name == rack_name:
+					if slot in self.ex_slots:
+						ex_list.append(rack_obj)
+					else:
+						rack_list.append(rack_obj)
+			self.tipracks[rack_name] = rack_list
+			self.ex_racks[rack_name] = ex_list
 
 
-	def add_expansion_slots(self, slots):
-		'''Add expansion slots to the available slots on the deck.
-		 This will not be used unless you assign them to a tiprack as well to load tipracks onto  the deck slot
-		 slots = ['A4','B4','C4','D4'] as list of strings or 'A4' as string \
+	def add_expansion_slots(self, slots : str | list[str]) -> None:
+		'''
+		This functions adds expansion slots [A4,B4,C4,D4] as an avialble slot that should be tracked along with all the other defauly slots on deck. \
+		This function should be called before assigning a tiprack to the any expansions slots. This function alone does not assign any tipracks to the expansion slots, \
+		you must use the assign_slots function or with add_starting_tipracks to assign tipracks to the expansion slots after calling this function. \
+		The exansion slots added with this function do not have to be ALL of the expansion slots installed on the robot, just the ones you want to reserve for tracking.
+		
+		:param self: TipTracker object
+		:param slots: The expansion slots to add as available slots for tiprack loading and tracking, can be a list of strings or a single string, valid inputs are 'A4','B4','C4', and 'D4'
+		:type slots: str | list[str]
+		:return: None
+		:rtype: None
 		'''
 		if self.ex_slots == None:
 			if type(slots) == str:
@@ -425,17 +673,31 @@ class TipTracker:
 		if len(invalid_slots) > 0:
 			raise ValueError(f"Invalid expansion slots: {invalid_slots}, slots must be A4, B4, C4, or D4")
 			
-	def drop_tip(self, pipette : int | str | protocol_api.InstrumentContext = None, locus : protocol_api.Labware | protocol_api.Well | None = None, return_tip : bool = False):
-		'''Drop tip at locus, if locus is None will drop tip at the default waste bin if dropping or back to its original slot if returning. 
-		pipette = 1 or 2, corresponding to which order you loaded them in
-		locus = labware or well to drop tip at, if None will drop at default waste bin
-		return_tip = bool, if True will return tip to original slot instead of dropping it at the waste bin'''
+
+	def drop_tip(self, pipette : int | str | protocol_api.InstrumentContext = None, locus : protocol_api.Labware | protocol_api.Well | None = None, return_tip : bool = False) -> None:
+		'''
+		Drop tip at a specified locus for a specified pipette. This is to replace the pipette.drop_tip() method to make it easier to conditionally return tips or drop them in a waste bin \
+		or a waste chute. Ensure you are not in partial tip configurations when setting return tip to True or it will cause an error. With no arguments passed, it will drop the tip of the \
+		acive pipette in the desigated trash. My general use is TrackerObject.drop_tip(return_tip=DryRunParameter) if an active pipette is set in the code prior to calling this function.
+		
+		:param self: TipTracker object
+		:param pipette: The pipette you want the tip to be removed for. If None then it will use TrackerObject.active_pipette, which should be set beforehand. Can be specified as the pipette object or as an integer (1 or 2) or string ('one' or 'two' or '1' or '2')
+		:type pipette: int | str | protocol_api.InstrumentContext
+		:param locus: Where the tip should be dropped or returned to, if None will drop at default waste bin or return to tiprack depending on the return_tip parameter.
+		:type locus: protocol_api.Labware | protocol_api.Well | None
+		:param return_tip: If the tip should be returned to its origin instead of dropping it at the waste bin
+		:type return_tip: bool
+		:return: None
+		:rtype: None
+		'''
 		if pipette != None:
 			pip = self.pipette1 if pipette in (1,'1',self.pipette1,'one','One') else self.pipette2 if pipette in (2,'2',self.pipette2,'two','Two') else None
+			if pip == None:
+				raise ValueError(f"Invalid pipette number {pipette}, must be 1 or 2, as strings or integers or pipette objects")
 		elif pipette == None and self.active_pipette != None:
 			pip = self.active_pipette
 		if pip == None and self.active_pipette == None:
-			raise ValueError(f"Invalid pipette number {pipette}, must be 1 or 2, as strings or integers or pipette objects")
+			raise ValueError(f"Active Pipette not set, please specify pipette or set active pipette beforehand")
 		self.drop_count[pip] = self.drop_count[pip] + 1
 		if return_tip:
 			pip.return_tip(locus)
@@ -443,12 +705,25 @@ class TipTracker:
 			pip.drop_tip(locus)
 
 			
-	def replace_tips(self,old_rack_name : str, new_rack_name : str , number_to_replace : int | None = None, manually_remove = True):
-		'''Remove a certain number (or all) of a certain type of tiprack to replace with a new type. \
-		Useful when you no longer need a type of tip on deck and you want the space for something else.
-		old_racks = list of tiprack labware objects to replace, can be a list of labware or a single labware object
-		new_rack_name = str of the new tiprack load name
-		number_to_replace = int of how many to replace, if None will replace all of that type'''
+	def replace_tips(self,old_rack_name : str, new_rack_name : str , number_to_replace : int | None = None, manually_remove = True) -> None:
+		'''
+		Remove a certain number (or all) of a speicified tiprack to replace with a new type. \
+		Useful when you no longer need a type of tip on deck and you want the space for something else. \
+		By default this will cause the protocol to pause and prompt the user to replace all tipracks of Type A with Type B \
+		and then assign all of the given slots to the new rack type in case another refill in needed later.
+
+		:param self: TipTracker object
+		:param old_rack_name: list of tiprack labware objects to replace, can be a list of labware or a single labware object
+		:type old_rack_name: str
+		:param new_rack_name:  str of the new tiprack load name
+		:type new_rack_name: str
+		:param number_to_replace: int of how many to replace, if None will replace all of that type
+		:type number_to_replace: int | None
+		:param manually_remove: If you want to manually remove the old racks from the deck instead of using the waste chute. On by default since they have to be manually replaced and protocol needs to be paused
+		:type manually_remove: bool
+		:return: None
+		:rtype: None
+		'''
 		if self.print_comments:
 			self.ctx.comment(f'Replacing {number_to_replace} {old_rack_name} with {new_rack_name}')
 		if self.debug:
@@ -468,13 +743,31 @@ class TipTracker:
 		self.load_tipracks(new_rack_name,slot_list)
 
 
-	def refill_tips(self, name, slots):
-		'''Internal Function to facilitate refilling tips of the same size. First clears the old data then replaces it by loading fresh tip boxes. \
-		Can call this method manually instead of calling clear_old load_tipracks independently. \
-		name = tiprack load name as str
-		slots = list of slots to refill, if str or labware will be converted to list. Labware should be passed only if it is a tiprack adapter'''
+	def refill_tips(self, name : str , slots : list[str] | str, waste_all_old : bool = True) -> None:
+		'''
+		This function refills tipracks of a given name on the given slots. It will first clear the old racks from the deck, \
+		either by moving them to the waste chute or off deck, then it will load new racks onto the deck and update the internal data. \
+		Any slots in the ignore_slots list will be ignored for refilling, so if you have a rack that you want to stay on the deck (tip reuse), \
+		add its slot to the ignore_slots list and it will be skipped over when refilling. \
+		
+		:param self: TipTracker object
+		:param name: API Load name for the tiprack that you want to refill, for example opentrons_flex_96_filtertip_50ul
+		:type name: str
+		:param slots: List or string of slots where the tipracks are located that you want to refill
+		:type slots: list[str] | str
+		:param waste_all_old: Whether to waste all old tipracks before refilling, when True all slots assigned to the tiprack will be wasted if empty, when False only the slots being refilled will be wasted if empty. This only matters if using the waste chute, if not all racks will be moved off deck regardless
+		:type waste_all_old: bool
+		:return: None
+		:rtype: None
+		'''
 		if self.ignore_slots != []:
-			slots = [slot for slot in slots if slot not in self.ignore_slots]
+			if type(slots) == list:
+				slots = [slot for slot in slots if slot not in self.ignore_slots]
+			elif type(slots) == str:
+				if slots in self.ignore_slots:
+					slots = None
+			else:
+				raise TypeError(f"Slots must be a string or list of strings, got {type(slots)}")
 			if self.print_comments:
 				self.ctx.comment(f'Ignoring slots {self.ignore_slots} for refill')
 			if self.debug:
@@ -483,14 +776,23 @@ class TipTracker:
 			self.ctx.comment(f'Refilling tips of {name} on {slots}')
 		if self.debug:
 			print(f'Refilling tips of {name} on {slots}')
-		self.clear_old(name,None,False)
-		
+		self.clear_old(name,slots if not waste_all_old else None,False)
 		self.load_tipracks(name,slots)
 
-	def waste_tips(self, slots):
-		'''Move tipboxes to waste, this is done automatically when a all types of a tip are used or when refill_all=True for tip pickup but can be used to manually move tips from any slots to waste. \
-		If called manually, make sure to use clear_old on the slots after to remove it from internal data \
-		slots = list of slots to move to waste, if str or labware will be converted to list. Labware should be passed only if it is a tiprack adapter'''
+
+	def waste_tips(self, slots : str | list[str] | protocol_api.Labware) -> None:
+		'''
+		This function throws tipracks into the waste chute or pauses to move them off deck if no chute or gripper is present. This function\
+		does not inately change the internal data, so it can be used independently of the refilling functions to just move old racks out of the way. \
+		Although its uses are niche, and within the majority of this code refill_tips is called right after to add the new tipracks to the deck \
+		ADAPTERS NOT CURRENTLY SUPPORTED FOR TIPRACKS IN ALL PARTS OF CODE
+		
+		:param self: TipTracker object
+		:param slots: The slot(s) to move the old tiprack(s) out of, can be a string for one slot, a list of strings for multiple slots or a labware object if using adapters 
+		:type slots: str | list[str] | protocol_api.Labware
+		:return: None
+		:rtype: None
+		'''
 		if self.print_comments:
 			self.ctx.comment(f'Wasting tips on slots {slots}: Using gripper : {self.use_gripper}')
 		if self.debug:
@@ -512,25 +814,50 @@ class TipTracker:
 					continue
 				self.ctx.move_labware(self.ctx.deck[slot], protocol_api.OFF_DECK)
 
-	def assign_tipracks(self, pipette : int | str | protocol_api.InstrumentContext, name : str):
-		'''Assign tipracks to pipette, this is done automatically when loading tips but can be used to reassign if needed.\
-		Instead of pip.tip_racks = [tipracks], use trackerObj.assign_tipracks(1,opentrons_flex_96_filtertip_50ul).\
-		pipette = 1 or 2, corresponding to which order you loaded them in
-		name = tiprack load name as str'''
-		if self.print_comments:
-			self.ctx.comment(f'Reassigning tipracks of {pipette} to {name}')
-		if self.debug:
-			print(f'Reassigning tipracks of {pipette} to {name}')
-		pip = self.pipette1 if pipette in (1,'1',self.pipette1,'one','One') else self.pipette2 if pipette in (2,'2',self.pipette2,'two','Two') else None
-		if pip == None:
-			raise ValueError(f"Invalid pipette number {pipette}, must be 1 or 2")
-		pip.tip_racks = self.tipracks[name]
 
-	def clear_old(self,name : str ,slots_to_clear : None | list = None,save_tips = True, waste_expansion : bool = False):
-		'''Remove old tipracks from internal data to replace with new tipracks in another function. This should generally only be used internally.\
-		Only use if you are sure you want to remove the tipracks from the internal data without moving them off deck physically. Keeps protocol from trying to move labware not on the deck anymore
-		name = Tiprack load name
-		slots_to_clear = List of slots to clear, if None will clear all tipracks of that type'''
+	def assign_tipracks(self, rack_name : str,pipette : int | str | protocol_api.InstrumentContext = None) -> None:
+		'''
+		Assign speficied tipracks to a specified pipette or self.active_pipette if none specified.\
+		Instead of pip.tip_racks = [tipracks], use TipTrackerObject.assign_tipracks(opentrons_flex_96_filtertip_50ul,protocol_api.InstrumentContext).\
+
+		:param self: TipTracker object
+		:param rack_name: API Load name for the tiprack that you want to use, for example opentrons_flex_96_filtertip_50ul
+		:type rack_name: str
+		:param pipette: The pipette that you want to assign the chosen tipracks to. Can be specified as the pipette object itself or as 1 or 2 corresponding to which order you loaded them in. If None uses the active pipette
+		:type pipette: int | str | protocol_api.InstrumentContext | NoneType
+		:return: None
+		:rtype: None
+		'''
+		if pipette == None and self.active_pipette == None:
+			raise ValueError(f"Active Pipette not defined correctly, please specify pipette or set active pipette: {self.active_pipette}")
+		if self.print_comments:
+			self.ctx.comment(f'Reassigning tipracks of {pipette} to {rack_name}')
+		if self.debug:
+			print(f'Reassigning tipracks of {pipette} to {rack_name}')
+		if pipette != None:
+			pip = self.pipette1 if pipette in (1,'1',self.pipette1,'one','One') else self.pipette2 if pipette in (2,'2',self.pipette2,'two','Two') else None
+			if pip == None:
+				raise ValueError(f"Invalid pipette number {pipette}, must be 1 or 2, as strings or integers or pipette objects")
+		else:
+			pip = self.active_pipette
+		pip.tip_racks = self.tipracks[rack_name]
+
+	def clear_old(self,name : str ,slots_to_clear : None | list = None,save_tips = True) -> None:
+		'''
+		Clear old tipracks of a certain type from internal data and optionally from the deck. If slots_to_clear is None, will clear all \
+		tipracks of that type from the deck and internal data. If slots_to_clear is a list of slots, will only clear those slots from the \
+		deck and internal data. If save_tips is False, will use the waste chute to remove the tips instead of prompting the user to remove them.\
+
+		:param self: TipTracker object
+		:param name: The labware load name of the tiprack to clear
+		:type name: str
+		:param slots_to_clear: Optional list of slots to clear, if None will clear all tipracks of that type
+		:type slots_to_clear: None | list
+		:param save_tips: Bool, if False will use the waste chute to remove tips instead of prompting the user to remove them all in one message (ie no move_labware command)
+		:type save_tips: bool
+		:return: None
+		:rtype: None
+		'''		
 		if self.print_comments:
 			self.ctx.comment(f'Clearing old tipracks of {name}')
 		if self.debug:
@@ -551,6 +878,8 @@ class TipTracker:
 			slots_to_clear = [slot for slot in self.rack_assignments.get(name,[]) if self.ctx.deck[slot] != None and slot not in self.ignore_slots]
 			for slot in slots_to_clear:
 				rack = self.ctx.deck[slot]
+				if rack in self.ctx.loaded_modules.values():
+					continue #prevent things on the stacker from being moved incorrectly when nothing is not the third column
 				self.ctx._core.move_labware(
 						labware_core=rack._core,
 						new_location=toss_location,
@@ -602,8 +931,21 @@ class TipTracker:
 			else:
 				raise KeyError(f"Tiprack {name} not found in tiprack list")
 			
-	def carousel(self, tiprack_to_move_away : protocol_api.Labware | str,tiprack_to_move_in : protocol_api.Labware | str):
+
+	def carousel(self, tiprack_to_move_away : protocol_api.Labware | str,tiprack_to_move_in : protocol_api.Labware | str) -> None:
+		'''
+		Carousel tipracks or labware around the deck using the open_slot as an intermediate location. Moves the tiprack_to_move_away to the open_slot,\
+		then moves the tiprack_to_move_in to the slot vacated by tiprack_to_move_away. Finally, updates the open_slot to be the slot vacated by tiprack_to_move_in. \
+		This is used a lot in the case of not wanting to use a waste chute and needing to move tipracks around the deck to free up space. \
 		
+		:param self: TipTracker object
+		:param tiprack_to_move_away: The labware to move away from its current slot into the open slot or the deck slot as string that you want to clear
+		:type tiprack_to_move_away: protocol_api.Labware | str
+		:param tiprack_to_move_in: The labware to move into the slot vacated by tiprack_to_move_away. If a string is passed it must be the deck slot of whatever labware you are trying to move into the vacated slot
+		:type tiprack_to_move_in: protocol_api.Labware | str
+		:return: None
+		:rtype: None
+		'''
 		if self.open_slot != None:
 			open_slot = self.open_slot
 		else:
@@ -614,14 +956,11 @@ class TipTracker:
 			tiprack_to_move_away = self.ctx.deck[intermediate_slot]
 		elif type(tiprack_to_move_away) == protocol_api.Labware:
 			intermediate_slot = tiprack_to_move_away.parent
-		
 		if type(tiprack_to_move_in) == str:
 			leaving_open_slot = tiprack_to_move_in
 			tiprack_to_move_in = self.ctx.deck[leaving_open_slot]
 		elif type(tiprack_to_move_in) == protocol_api.Labware:
 			leaving_open_slot = tiprack_to_move_in.parent
-		
-		
 		if self.debug:
 			print(f' Carousel from {tiprack_to_move_away} on {intermediate_slot} to {self.open_slot}')
 		self._shuttle_labware(tiprack_to_move_away,open_slot)
@@ -631,18 +970,33 @@ class TipTracker:
 		if self.debug:
 			print(f'----->Assigning open_slot to {leaving_open_slot}')
 		self.open_slot = leaving_open_slot
-				
-	def move_from_stacker(self,rackname,):
-		stacker : protocol_api.FlexStackerContext = self.stackers[rackname][0]
+
+
+	def move_from_stacker(self,rackname : str) -> protocol_api.Labware:
+		'''
+		Grab the next tiprack available from the any stacker module that has tipracks of the given rackname. If a tiprack has a lid, it will be removed and placed in the waste bin. If the stacker has the proper racktype on the shuttle, it will return the shuttle labware. If the stacker has a different labware on it, it will move it to the open_slot first. \
+		Returns the labware object retrieved from the stacker. It will use all of the tipracks in one stacker before moving to the next stacker of the same labware type
 		
-		if stacker.labware == None:
+		:param self: TipTracker object
+		:param rackname: The API load name of the labware (tiprack) to retrieve from the stacker
+		:type rackname: str
+		:return: Returns the next available labware from the stacker of the given rackname
+		:rtype: Labware
+		'''
+		for x,stacker_list in enumerate(self.stackers[rackname]):
+			if stacker_list[1] > 0:
+				stacker : protocol_api.FlexStackerContext = stacker_list[0]
+				chosen_index = x
+				break
+		stacker_current_labware = stacker.labware
+		if stacker_current_labware == None:
 			if self.print_comments:
 				self.ctx.comment(f'Retrieving labware from stacker for {rackname}')
 			if self.debug:
 				print(f'Retrieving labware from stacker for {rackname}')
-			labware : protocol_api.Labware = stacker.retrieve()
-			self.stackers[rackname][1] = self.stackers[rackname][1] - 1 #Change Quantity of stacker
-			if self.stackers[rackname][2]: #This should be changes, internal flag for lid
+			labware = stacker.retrieve()
+			self.stackers[rackname][chosen_index][1] = self.stackers[rackname][chosen_index][1] - 1 #Change Quantity of stacker
+			if self.stackers[rackname][chosen_index][2]: #This should be changes, internal flag for lid
 				if self.print_comments:
 					self.ctx.comment(f'Removing lid from stacker for {rackname}')
 				if self.debug:
@@ -650,41 +1004,127 @@ class TipTracker:
 				self.ctx.move_lid(labware,self.waste,use_gripper=self.use_gripper)
 		
 		else:
-			if self.print_comments:
-				self.ctx.comment(f'Getting labware already on shuttle for {rackname}')
-			if self.debug:
-				print(f'Getting labware already on shuttle for {rackname}')
-			labware = stacker.labware #If there is a tiprack on the stacker
+			if stacker_current_labware.load_name != rackname:
+				if self.print_comments:
+					self.ctx.comment(f'Labware on stacker is not {rackname}, moving to {self.open_slot} and retrieving new labware')
+				if self.debug:
+					print(f'Labware on stacker is not {rackname}, moving to {self.open_slot} and retrieving new labware')
+				if self.open_slot == None:
+					raise ValueError("No open slot defined, please define an open slot to move the labware to with non-matching labware on shuttle")
+				self._shuttle_labware(stacker_current_labware,self.open_slot)
+				self.return_to_stacker = (stacker_current_labware,self.open_slot,rackname,chosen_index)
+				labware = stacker.retrieve()
+				self.stackers[rackname][chosen_index][1] = self.stackers[rackname][chosen_index][1] - 1 #Change Quantity of stacker
+				if self.stackers[rackname][chosen_index][2]: 
+					if self.print_comments:
+						self.ctx.comment(f'Removing lid from stacker for {rackname}')
+					if self.debug:
+						print(f'Removing lid from stacker for {rackname}')
+					self.ctx.move_lid(labware,self.waste,use_gripper=self.use_gripper)
+			else:
+				if self.print_comments:
+					self.ctx.comment(f'Getting labware already on shuttle for {rackname}')
+				if self.debug:
+					print(f'Getting labware already on shuttle for {rackname}')
+				labware = stacker_current_labware #If there is a tiprack on the stacker
 		return labware
 		
 	
-	def add_stacker(self, slot, rackname, initial_count, lid, load_on_carridge):
+	def add_stacker(self, slot : str, rackname : str, initial_count : int, lid : str | None, load_on_shuttle : bool = True) -> protocol_api.FlexStackerContext:
+		'''
+		Load a stacker mondule on the deck and fill it with an initial number of tipracks. This replaces using ctx.load_module() directly to ensure proper tracking of the stacker and its contents.\
+		The function will return a FlexStackerContext object that can be used as normal.
+		
+		:param self: TipTracker object
+		:param slot: The deck slot to load the stacker module on
+		:type slot: str
+		:param rackname: The API load name of the labware (tiprack) to load into the stacker
+		:type rackname: str
+		:param initial_count: The initial number of tipracks to load into the stacker
+		:type initial_count: int
+		:param lid: The lid to load onto the tiprack in the stacker
+		:type lid: str | None
+		:param load_on_shuttle: Whether to load one tiprack onto the shuttle instead of storing it in the stacker
+		:type load_on_shuttle: bool
+		:return: The FlexStackerContext object representing the loaded stacker module
+		:rtype: protocol_api.FlexStackerContext
+		'''
 		if self.print_comments:
 			self.ctx.comment(f'Adding stacker module on slot {slot} with {initial_count} {rackname}')
 		if self.debug:
 			print(f'Adding stacker module on slot {slot} with {initial_count} {rackname}')
 		stacker_obj = self.ctx.load_module('flexStackerModuleV1', slot)
-		self.stackers[rackname] = [stacker_obj,None,True if lid != None else False]
-		self.load_tips_in_stacker(stacker_obj,rackname,initial_count,lid,load_on_carridge)
+		if rackname in self.stackers.keys():
+			self.stackers[rackname].append([stacker_obj,None,True if lid != None else False])
+		else:
+			self.stackers[rackname] = [[stacker_obj,None,True if lid != None else False]]
+		self.load_tips_in_stacker(stacker_obj,rackname,initial_count,lid,load_on_shuttle)
 		return stacker_obj
 
-	def load_tips_in_stacker(self,stacker : protocol_api.FlexStackerContext,rackname : str,quantity : int,lid : str | None = None, load_on_carridge : bool = True):
+
+	def load_tips_in_stacker(self,stacker : protocol_api.FlexStackerContext,rackname : str,quantity : int,lid : str | None = None, load_on_shuttle : bool = True) -> None:
+		'''
+		Function to load tipracks in stacker at the beginning of the protocol. Currently also used to reload stackers when they run out of tips, but will change this in the future.
+		
+		:param self: TipTracker object
+		:param stacker: The FlexStackerContext to load tips into
+		:type stacker: protocol_api.FlexStackerContext
+		:param rackname: The API load name of the labware (tiprack) to load into the stacker
+		:type rackname: str
+		:param quantity: The number of tipracks to load into the stacker. With a max of 7. When quantity > 6, one tiprack will have to be loaded onto the shuttle.
+		:type quantity: int
+		:param lid: The lid to load onto the tiprack in the stacker. A lid will not be loaded onto the shuttle if load_on_shuttle is True.
+		:type lid: str | None
+		:param load_on_shuttle: Whether to load one tiprack onto the shuttle instead of storing it in the stacker. When quantity > 6, this must be True. For 6 and under, this can be set to False to store all tipracks in the stacker or set to true so that quantity - 1 tipracks are stored in the stacker and one on the shuttle.
+		:type load_on_shuttle: bool
+		:return: None
+		:rtype: None
+		'''
 		if self.print_comments:
 			self.ctx.comment(f'Loading {quantity} {rackname} into stacker in {stacker}')
 		if self.debug:
 			print(f'Loading {quantity} {rackname} into stacker in {stacker}')
-		stacker.set_stored_labware(rackname,count=quantity - 1 if load_on_carridge else quantity,lid=lid)
+		stacker.set_stored_labware(rackname,count=quantity - 1 if load_on_shuttle else quantity,lid=lid)
 		if rackname not in self.tip_rack_counts.keys():
 			self.tip_rack_counts[rackname] = quantity
 		else:
 			self.tip_rack_counts[rackname] = self.tip_rack_counts[rackname] + quantity
-		if load_on_carridge:
+		if load_on_shuttle:
 			if self.print_comments:
-				self.ctx.comment(f'Loading labware onto stacker carriage for {rackname}')
+				self.ctx.comment(f'Loading labware onto stacker shuttle for {rackname}')
 			if self.debug:
-				print(f'Loading labware onto stacker carriage for {rackname}')
+				print(f'Loading labware onto stacker shuttle for {rackname}')
 			stacker.load_labware(rackname)
-		self.stackers[rackname][1] = quantity - 1 if load_on_carridge else quantity
+		for x,stacker_list in enumerate(self.stackers[rackname]):
+			if stacker_list[0] == stacker:
+				self.stackers[rackname][x][1] = quantity - 1 if load_on_shuttle else quantity
 
-	def _shuttle_labware(self,labware,location):
+
+	def _shuttle_labware(self,labware : protocol_api.Labware,location: str | protocol_api.ModuleContext | protocol_api.Labware) -> None:
+		'''
+		Internal function to move labware using the gripper or not based on settlings. This is generally only used when moving labware from the stackers to the deck or when carouseling tipracks.
+		
+		:param self: TipTracker object
+		:param labware: The lawbare to move
+		:type labware: protocol_api.Labware
+		:param location: The location to move the labware to. This can be a deck slot (str), a module context, or another labware / adapter context.
+		:type location: str | protocol_api.ModuleContext | protocol_api.Labware
+		:return: None
+		:rtype: None
+		'''
 		self.ctx.move_labware(labware,location,use_gripper=self.use_gripper)
+
+
+'''
+Version Changes: 
+1. replaced carriage with shuttle for consistency with flex terminology
+2. removed _using_stacker property, now checks labware in stacker
+3. two stackers can now have the same rack types, from dict[list[info]] to dict[list[list[info]]]
+4. Stackers can have different labware loaded onto the shuttle. Will use self.open_slot to move labware if needed
+5. Added return_to_stacker property to temporarily hold labware moved off the stacker shuttle when getting new labware
+6. Added move_from_stacker method to handle getting labware from stacker with new logic
+7. Added docstrings to methods
+8. reset_rack_list method edited to allow for multiple rack types to be reset at once 
+9. Reformmated Init method for better readability / understandability and added docstring and improved documentation
+10. Improved error handling for more specific error messages for common user errors 
+'''
