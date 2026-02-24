@@ -7,7 +7,7 @@ USE AT YOUR OWN RISK
 Tracking the tip boxes on the expansion slots and in stackers are not accessibly to pipettes without explicitly calling the gripper to move the empty labware away and move the new tiprack from the expansion / stacker over to replace it. Because these are explicit API calls and run time parameters affect tip usage, it makes it hard to track when tip racks need to be replaced.
 
 ## The Solution
-TipTracker is a class designed to solve this problem. After setting up the Tracker object, it will use its own version of InstrumentContect.pick_up_tip() commands (as well as many others) to handle when pipettes are out of tips. Instead of having to track all times where you could run out of tips, TipTracker automatically grabs tips from whatever source is available wether it be stackers or expansion slots, without needed explicit API calls or lengthy try blocks. When all tip racks are gone and more are needed, the protocol is paused and prompts the user to add a specified number of tip racks. The method will also dispose of empty tip racks in one of three ways: 1. Through the waste chute. 2. Carousel tips around but keep them on deck until no tips remain and remove manually 3. Manually without carousel. 
+TipTracker is a class designed to solve this problem. After setting up the Tracker object, it will use its own version of `InstrumentContect.pick_up_tip()` commands (as well as many others) to handle when pipettes are out of tips. Instead of having to track all times where you could run out of tips, TipTracker automatically grabs tips from whatever source is available wether it be stackers or expansion slots, without needed explicit API calls or lengthy try blocks. When all tip racks are gone and more are needed, the protocol is paused and prompts the user to add a specified number of tip racks. The method will also dispose of empty tip racks in one of three ways: 1. Through the waste chute. 2. Carousel tips around but keep them on deck until no tips remain and remove manually 3. Manually without carousel. 
 
 ## TipTracker Intent
 The following sections will describe how TipTracker is intended to be used, but first I will explain the different cases I have considered in my development
@@ -80,9 +80,9 @@ Required Parameters: list of expansion slots that you want to use.
 	TipTrackerObject.add_expansion_slots(expansion_slots_for_tips)
 ```
 #### Stackers
-If you are using stackers we will add the stacker using an internal method that will return the StackerObject so developers can still interact with it. You may choose to use the returned stacker to load something else onto the shuttle (when load_on_shuttle = False). In these cases you should set TipTracker.open_slot if you want the Tracker to automatically move said labware out of the way to grab new tip racks and then return it. If you want a tiprack on the shuttle set the load_on_shuttle property to True. Lids on tip racks will be thrown away when the labware is dispensed. Lids will be loaded on Tip racks in the stacker when enabled but no on any tip racks on the shuttle or in the deck
+If you are using stackers we will add the stacker using an internal method that will return the StackerObject so developers can still interact with it. You may choose to use the returned stacker to load something else onto the shuttle (when `load_on_shuttle = False`). In these cases you should set `TipTrackerObject.open_slot` if you want the Tracker to automatically move said labware out of the way to grab new tip racks and then return it. If you want a tiprack on the shuttle set the `load_on_shuttle` property to `True`. Lids on tip racks will be thrown away when the labware is dispensed. Lids will be loaded on Tip racks in the stacker when enabled but no on any tip racks on the shuttle or in the deck
 
-If load on shuttle is True and intital_count is less than 7, then the first rack will be on the shuttle and n-1 will be loaded in the stacker.
+If load on shuttle is `True` and `intital_count` is less than 7, then the first rack will be on the shuttle and n-1 will be loaded in the stacker.
 ```
 Stacker = TipTrackerObject.add_stacker(slot='D4',
                         rackname=TIPS200,
@@ -101,7 +101,7 @@ Labware = Stacker.load_labware('nest_96_wellplate_2ml_deep')
 TipTrackerObject.open_slot = MagneticBlockContext #This will move the DWP to the magnet whenever we need a tiprack from the stacker
 ```
 ### Loading Tip racks to the Deck
-Instead of loading our tip racks with the load labware function, we will use `add_starting_tipracks` which takes a pair consisting of a API tiprack load name and the slots you want to assign to it. It will load a tiprack in that slot, and add all slots to the tiprack assignment, Meaning should we run out of said tip, it should be refilled in all of these slots. We can add up to four tiprack-slot pairs to the tracker at a time.
+Instead of loading our tip racks with the load labware function, we will use `add_starting_tipracks` which takes a pair consisting of a API tiprack load name and the slots you want to assign to it. It will load a tiprack in that slot, and add all slots to the tiprack assignment. Meaning should we run out of said tip, it should be refilled in all of these slots. We can add up to four tiprack-slot pairs to the tracker at a time.
 ```
 	TipTrackerObject.add_starting_tipracks(
 		tiprack1 = 'opentrons_flex_96_filtertiprack_200ul',
@@ -112,25 +112,27 @@ Instead of loading our tip racks with the load labware function, we will use `ad
 		slots3 = ['B3'])
 ```
 ### Configuration Special Considerations
-There are a few routine operations where additional steps to configure the TipTracker might be necessary to either make the protocol easier to code or to even make it possible. This section is for some of these situations
+There are a few routine operations where additional steps to configure the `TipTracker` might be necessary to make the protocol easier to code or to even make it possible. This section is for some of these situations.
 
 #### Carouseling Tips (No Dumping Racks Down Waste Chute)
-Not having a waste chute for higher throughput applications is severely limiting, but it does not make the TipTracker unusable. Since we can no longer dump empty tip racks off of the deck, we must now find other slots to hold them in while we shuffle stuff around the deck. We do this by setting an open_slot property
+Not having a waste chute for higher throughput applications is severely limiting, but it does not make the `TipTracker` unusable. Since we can no longer dump empty tip racks off of the deck, we must now find other slots to hold them in while we shuffle stuff around the deck. We do this by setting an open_slot property:
 ```
 	TipTrackerObject.use_chute = False
 	TipTrackerObject.carousel_tips = True
 	TipTrackerObject.open_slot = 'A3'
 ```
-In these three lines, I first tell the Tracker that I do not want to use the Waste chute to dispose of tip racks. This is automatically set to False when not using the waste chute. I then tell the tracker that I want my empty racks to be carouseled around the deck instead. This is default True when not using the waste chute. I then say I will reserve the A3 slot for my first empty rack. It will update this property as necessary as labware is moved around the deck. 
+In the first line, the `use_chute` property is turned to `False` which prevents tip racks from being thrown down the chute when installed. This is automatically `False` when not using the waste chute, and does not have to be directly called. In the next line, the TipTrackerObject is configured to carousel empty racks around the deck. This is default `True` when not using the waste chute. In the next line, the A3 slot is desisgnated as slot to recieve an empty tiprack when we need to move things around the deck. It will update this property as necessary as labware is moved around the deck. 
+
+Note that stackers can also be used to store empty tipracks to prevent them from being throw out
 
 #### Partial Tip Pickup
-Although it is a powerful tool, partial tip pickup is annoying to code because of the spacial limitations of tall labware and the gantry. Often while coding you have to make a deck setup where your partial pickup is not going to be broken by other routine motions. We can simplify our approach by tailoring the TipTracker to force all pickup options for a given pipette to occur at a given slot. This means I only have to worry about collisions tiprack slot and when the pipette is out of tips it will move the empty tiprack out of the way and refill it with another tiprack on the deck. 
+Although it is a powerful tool, partial tip pickup can be difficult to code because of the spacial limitations of tall labware and the gantry bounds. A lot of time id dedicated to coding the deck setup so partial pickup is not going to be broken by other routine motions. We can simplify our approach by tailoring the TipTrackerObject to force all pickup options for a given pipette to occur at a given slot. This means a mironity of slots have to be considered for collisions and pipette bounds regarding pick up. When the pipette is out of tips it will move the empty tiprack out of the way and refill it with another tiprack on the deck into the same slot. 
 ```
 	ctx.load_trash_bin('D3')
 	TipTrackerObject.open_slot = 'A4'
 	TipTrackerObject.pick_up_slots['opentrons_flex_96_filtertiprack_50ul'] = 'A1'
 ```
-This will force all pickup actions for the 50µL Tip to happen on A1. In this example, because I am using a trash bin, I must also set a open_slot. This means that when the tips in A1 are empty, they will be moved to A4 and then my next tiprack can fill the now empty A1. Pickup slots should be defined after starting tip racks are added but before any pick up actions that should be on this slot.
+An `open_slot` is designated in this example since a trash bin is being used. In the final line, a slot is added as the dictionary entry to a tiprack. This will force all pickup actions for the 50µL Tip to happen on A1. When the tips in A1 are empty, they will be moved to A4 and then my next tiprack can fill the now empty A1. Pickup slots should be defined after starting tip racks are added but before any pick up actions that should be on this slot.
 
 #### Reusing Tips and Ignoring Slots
 There are many times that you may want to return tips to a tiprack to use later in the protocol. Because these tips are marked as used it will cause the protocol context to believe the rack is empty. To prevent reusable racks from being replaced, we set the ignore_slots property. Imagine a situation where we have loaded a tiprack into slot A1,
@@ -205,7 +207,7 @@ When we are wanting to attach tip racks to a pipette we call the `assign_tiprack
 The two most common functions are going to be pickup and drop. 75% of this entire package is run through the pick_up function. Pick_up will return a integer value linked to how it was able to pickup a tip wether there was already one available, it had to move something from a stacker, or it required manual intervention. Pickup has no required arguments with an active_pipette preset. Otherwise only pipette is required. It can optionally take a Location tip to pickup in the case you want a specific tip and a boolean to refill all tips when any tip is out (to minimize manual intervention).
 
 The drop_tip function is largely a 1:1 replacement of `InstrumentContect.drop_tip()`. It takes an optional `InsturmentContect` parameter if no active_pipette is set, a location argument if you are wanting to drop the tip in any given well and may take a return_tip boolean if you are wanting to return the tip instead of trashing it.
-*Pro Tip* Use `TipTrackerObject.drop_tip(return_tip=DryRunParameter)` to always return your tips during dry runs instead of having lots of `if DryRun: return_tip` blocks.
+*Pro Tip* Use `TipTrackerObject.drop_tip(return_tip=DryRunParameter)` to always return your tips during dry runs instead of having lots of `if DryRun: return_tip` blocks. Unless you are using partial tip pickup
 ```
 	for i in range (47):
 		TipTrackerObject.pick_up(
