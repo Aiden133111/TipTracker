@@ -84,7 +84,7 @@ class TipTracker:
 
 		self.metadata = {
 			'Author': 'Aiden McFadden',
-			'Version' : '2.0',
+			'Version' : '2.2',
 			'github': 'https://github.com/Aiden133111/TipTracker',
 			'README' : 'https://github.com/Aiden133111/TipTracker/blob/main/README.md'
 		}
