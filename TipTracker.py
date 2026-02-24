@@ -1483,6 +1483,7 @@ class TipTracker:
 							self.ctx.comment(f'No remaining tipracks in {stacker[0]}')
 						if self.debug:
 							print(f'No remaining tipracks in {stacker[0]}')
+							
 '''
 Version Changes: 
 1. Added some traceback errors to help with debugging
