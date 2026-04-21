@@ -159,7 +159,7 @@ class TipTracker:
 		#The max racks count for each tiprack type. This will prevent extra racks to be loaded when a defined threshold has been reached. This can be set using add_starting_tiprack or modified by direct call
 		#using the API load name of the tiprack you want to set. Read/Write Okay
 		self.max_racks_count : dict[str, int] = {}
-		#A list of deck slot names that should be ignored by the tracker for throwing away and refill, just keep on deck useful for tip reuse. Read/Write okay ex TipTracker.ignore_slots.append('A3').
+		#Deck slot names (e.g. A3) ignored for waste/refill; resolved for labware via parent slot. Read/Write: TipTracker.ignore_slots.append('A3').
 		self.ignore_slots : list[str] = []
 		#A dictionary of tiprack load names and the slots they should only pick up from to force a pickup in a given slot, useful for partial tip pickups.
 		#Read/Write okay TipTracker.pick_up_slots['opentrons_flex_96_tiprack_50ul'] = 'A1'
@@ -169,7 +169,35 @@ class TipTracker:
 		self.active_pipette = None		
 		#If a single adapter should be used for all tipracks. If true, the first adapter loaded will be used for all tipracks and it will be auto assigned to the most recent pickup call
 		self.global_adapter : bool = False		
-															
+
+	def _deck_slot_id(self, labware_or_slot: protocol_api.Labware | str) -> str:
+		"""Resolve a deck slot name (e.g. A1, B4) for comparisons to ignore_slots and ex_slots."""
+		if isinstance(labware_or_slot, str):
+			return labware_or_slot
+		p = getattr(labware_or_slot, "parent", None)
+		seen = 0
+		while p is not None and seen < 8:
+			seen += 1
+			if isinstance(p, str):
+				return p
+			obj = getattr(p, "object", None)
+			if isinstance(obj, str):
+				return obj
+			p = getattr(p, "parent", None)
+		p0 = labware_or_slot.parent
+		return str(p0) if p0 is not None else ""
+
+	def _waste_empty_rack_now(self, rack: protocol_api.Labware, rack_name: str) -> bool:
+		"""
+		Whether an empty rack should go to waste before expansion/stacker refill handling.
+		Skip: racks on ignore_slots (reuse); empties on expansion slots while ex_racks still has racks to shuttle in.
+		"""
+		sk = self._deck_slot_id(rack)
+		if sk in self.ignore_slots:
+			return False
+		if sk in self.ex_slots and self.ex_racks.get(rack_name):
+			return False
+		return True
 
 	def assign_slots(self, tiprack1 : str, slots1 : str | list[str], tiprack2 : str = None, slots2 : list[str] | str = None,
 				   tiprack3 : str = None, slots3 : str | list[str] = None, tiprack4 : str | None = None, slots4 : str | list[str] | None = None,
@@ -433,8 +461,27 @@ class TipTracker:
 		vacant_slots = list(set(vacant_slots))
 		empty_tiprack_slots = [rack.parent for rack in empty_tipracks] # Get the slots of the racks on the deck that have no tips and are not in ignored slots
 		if refill_all:
-			other_rack_slots = { rack_load_name : [rack.parent for rack in rack_list if not any([well.has_tip for well in rack.wells()])] for rack_load_name,rack_list in self.tipracks.items() if rack_load_name != rack_name} # Move these to waste
-			empty_tip_slots = {rack_load_name : [slot for slot in racklist if self.ctx.deck[slot] == None] for rack_load_name, racklist in self.rack_assignments.items()} # Load these plus other racks slots
+			other_rack_slots = {}
+			for rack_load_name, rack_list in self.tipracks.items():
+				if rack_load_name == rack_name:
+					continue
+				empties = []
+				for rack in rack_list:
+					if any(well.has_tip for well in rack.wells()):
+						continue
+					sk = self._deck_slot_id(rack)
+					if sk in self.ignore_slots:
+						continue
+					if sk in self.ex_slots and self.ex_racks.get(rack_load_name):
+						continue
+					empties.append(rack.parent)
+				if empties:
+					other_rack_slots[rack_load_name] = empties
+			empty_tip_slots = {
+				rl: [slot for slot in racklist
+					if slot not in self.ignore_slots and self.ctx.deck[slot] is None]
+				for rl, racklist in self.rack_assignments.items()
+			}
 		#######################################################################################################################################################################
 		#Updates a deck in the edge case that an adapter pickup is empty and now has been reassigned to a different rack_name, this shuffles the correct rack onto the adapter#
 		#######################################################################################################################################################################
@@ -509,9 +556,14 @@ class TipTracker:
 				self.ctx.comment('Out of tips, starting refilling process')
 			if self.debug:
 				print('Out of tips, starting refilling process')
-			#Trash old tips
-			if not self.carousel_tips: #Trash tips in waste chute if able
-				self.waste_tips(empty_tipracks)
+			# Labware on main deck to carousel against stacker racks (exclude expansion staging rows)
+			stacker_carousel_olds = [r for r in empty_tipracks if self._deck_slot_id(r) not in self.ex_slots]
+			wasted_slot_ids: list[str] = []
+			# Trash old tips (not ignored slots; not expansion-slot empties while ex_racks still supplies racks)
+			if not self.carousel_tips:
+				empties_to_waste = [r for r in empty_tipracks if self._waste_empty_rack_now(r, rack_name)]
+				wasted_slot_ids = [self._deck_slot_id(r) for r in empties_to_waste]
+				self.waste_tips(empties_to_waste)
 			if self.ex_racks.get(rack_name, None) == None and self.stackers.get(rack_name,None) == None:
 				if self.print_comments:
 					self.ctx.comment('No expansion slots / stackers defined, Refilling Manually') # Dont have to worry about carousel here, no ex slots
@@ -576,7 +628,13 @@ class TipTracker:
 					
 					active_pipette.pick_up_tip(locus)
 				elif rack_name in self.stackers.keys() and sum([stacker[1] for stacker in self.stackers.get(rack_name, [])]) > 0:
-					self.grab_from_stacker(rack_name, empty_tipracks)
+					if self.carousel_tips:
+						self.grab_from_stacker(rack_name, stacker_carousel_olds)
+					else:
+						_stacker_deposit_slots = list(dict.fromkeys(
+							[s for s in vacant_slots + wasted_slot_ids if s not in self.ignore_slots]
+						))
+						self.grab_from_stacker(rack_name, _stacker_deposit_slots)
 					self.reset_rack_list(rack_name)
 					self.assign_tipracks(pipette=active_pipette,rack_name=rack_name)
 					active_pipette.pick_up_tip(locus)
@@ -917,6 +975,12 @@ class TipTracker:
 				self.ctx.comment(f'Ignoring slots {self.ignore_slots} for refill')
 			if self.debug:
 				print(f'Ignoring slots {self.ignore_slots} for refill')
+		if slots is None or slots == []:
+			if self.print_comments:
+				self.ctx.comment(f'No slots left to refill for {name} after applying ignore_slots; skipping refill_tips')
+			if self.debug:
+				print(f'No slots left to refill for {name} after applying ignore_slots; skipping refill_tips')
+			return
 		if self.print_comments:
 			self.ctx.comment(f'Refilling tips of {name} on {slots}')
 		if self.debug:
@@ -948,21 +1012,22 @@ class TipTracker:
 			slots = [slots]
 		destination = self.waste if self.use_chute else protocol_api.OFF_DECK
 		for slot in slots:
-			if slot in self.ignore_slots:
+			slot_key = self._deck_slot_id(slot) if isinstance(slot, protocol_api.Labware) else slot
+			if slot_key in self.ignore_slots:
 				if self.debug:
-					print(f'Ignoring slot {slot} for waste tips')
+					print(f'Ignoring slot {slot_key} for waste tips')
 				if self.print_comments:
-					self.ctx.comment(f'Ignoring slot {slot} for waste tips')
+					self.ctx.comment(f'Ignoring slot {slot_key} for waste tips')
 				continue
-			if slot in self.tiprack_adapters.keys():
-				labware_to_move = self.tiprack_adapters[slot][1].child
+			if slot_key in self.tiprack_adapters.keys():
+				labware_to_move = self.tiprack_adapters[slot_key][1].child
 			elif type(slot) == protocol_api.Labware:
 				if slot.load_name != 'opentrons_flex_96_tiprack_adapter':
 					labware_to_move = slot
 				else:
 					labware_to_move = slot.child
 			else:
-				labware_to_move = self.ctx.deck[slot]
+				labware_to_move = self.ctx.deck[slot_key]
 			self.ctx.move_labware(labware_to_move, destination,use_gripper=self.use_gripper)
 
 
@@ -1010,11 +1075,11 @@ class TipTracker:
 				if pip.tip_racks == [] and self.ex_racks.get(rack_name,[]) == [] and rack_name not in self.stackers.keys():
 					self._refill_deck_manually(self.rack_assignments[rack_name],rack_name)
 					self.assign_tipracks(rack_name,pip,mode,start,end)
-			elif mode == ALL:
+			elif mode == ALL and pip.active_channels == 96:
 				if self.global_adapter:
 					self.assign_slots(rack_name, list(self.tiprack_adapters.keys())[0])
 				pip.configure_nozzle_layout(style=mode,start=start,end=end,tip_racks=self.adapter_pickup_tipracks[rack_name])
-			elif mode == None:
+			else:
 				if pip.active_channels < 96:
 					pip.tip_racks = self.tipracks[rack_name]
 				else:
