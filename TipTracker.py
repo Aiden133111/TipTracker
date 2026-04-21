@@ -199,6 +199,20 @@ class TipTracker:
 			return False
 		return True
 
+	def _slot_has_empty_tiprack_of_type(self, slot: str, name: str) -> bool:
+		"""True if this slot holds an exhausted tiprack of the given API load name (ready to clear)."""
+		rk = self.ctx.deck[slot]
+		if rk is None:
+			return False
+		if rk.load_name == 'opentrons_flex_96_tiprack_adapter':
+			ch = rk.child
+			if ch is None or ch.load_name != name:
+				return False
+			return not any(w.has_tip for w in ch.wells())
+		if rk.load_name != name:
+			return False
+		return not any(w.has_tip for w in rk.wells())
+
 	def assign_slots(self, tiprack1 : str, slots1 : str | list[str], tiprack2 : str = None, slots2 : list[str] | str = None,
 				   tiprack3 : str = None, slots3 : str | list[str] = None, tiprack4 : str | None = None, slots4 : str | list[str] | None = None,
 				   clear_other_slots: bool = False) -> None:
@@ -948,17 +962,17 @@ class TipTracker:
 
 	def refill_tips(self, name : str , slots : list[str] | str, waste_all_old : bool = True) -> None:
 		'''
-		This function refills tipracks of a given name on the given slots. It will first clear the old racks from the deck, \
-		either by moving them to the waste chute or off deck, then it will load new racks onto the deck and update the internal data. \
+		This function refills tipracks of a given name on the given slots. It will first clear **exhausted** tipracks from the deck, \
+		by moving them to the waste chute or off deck, then load new racks onto slots that need them. Racks that still have tips are left in place. \
 		Any slots in the ignore_slots list will be ignored for refilling, so if you have a rack that you want to stay on the deck (tip reuse), \
 		add its slot to the ignore_slots list and it will be skipped over when refilling. \
 		
 		:param self: TipTracker object
 		:param name: API Load name for the tiprack that you want to refill, for example opentrons_flex_96_filtertip_50ul
 		:type name: str
-		:param slots: List or string of slots where the tipracks are located that you want to refill
+		:param slots: List or string of slots involved in this refill (typically rack assignment slots minus ignore_slots)
 		:type slots: list[str] | str
-		:param waste_all_old: Whether to waste all old tipracks before refilling, when True all slots assigned to the tiprack will be wasted if empty, when False only the slots being refilled will be wasted if empty. This only matters if using the waste chute, if not all racks will be moved off deck regardless
+		:param waste_all_old: If True, scan all slots assigned to this tiprack type for exhausted racks to clear; if False, only scan the slots in ``slots``.
 		:type waste_all_old: bool
 		:return: None
 		:rtype: None
@@ -981,14 +995,20 @@ class TipTracker:
 			if self.debug:
 				print(f'No slots left to refill for {name} after applying ignore_slots; skipping refill_tips')
 			return
+		slot_list = [slots] if isinstance(slots, str) else list(slots)
 		if self.print_comments:
-			self.ctx.comment(f'Refilling tips of {name} on {slots}')
+			self.ctx.comment(f'Refilling tips of {name} on {slot_list}')
 		if self.debug:
-			print(f'Refilling tips of {name} on {slots}')
-		clear_slots = [slot for slot in slots if slot not in self.ignore_slots and self.ctx.deck[slot] != None ]
-		clear_slots = [slot for slot in clear_slots if self.ctx.deck[slot].load_name != 'opentrons_flex_96_tiprack_adapter']
-		self.clear_old(name,clear_slots if not waste_all_old else None,False)
-		self.load_tipracks(name,slots)
+			print(f'Refilling tips of {name} on {slot_list}')
+		if waste_all_old:
+			candidate_slots = [s for s in self.rack_assignments.get(name, []) if s not in self.ignore_slots]
+		else:
+			candidate_slots = [s for s in slot_list if s not in self.ignore_slots]
+		clear_slots = [s for s in candidate_slots if self._slot_has_empty_tiprack_of_type(s, name)]
+		self.clear_old(name, clear_slots, False)
+		# Load only where a rack is needed: we cleared an empty rack here, or the slot is still vacant
+		load_slots = list(dict.fromkeys(clear_slots + [s for s in slot_list if self.ctx.deck[s] is None]))
+		self.load_tipracks(name, load_slots)
 
 
 	def waste_tips(self, slots : str | list[str] | protocol_api.Labware) -> None:
