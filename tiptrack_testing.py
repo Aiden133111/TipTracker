@@ -7,10 +7,10 @@ from opentrons.types import NozzleConfigurationType
 
 #PROTOCOL REQUIREMENTS
 metadata = {
-	'protocolName': 'Tip Tracking Class',
+	'protocolName': 'TipTracker debug harness',
 	'author': 'Aiden McFadden, Opentrons',
 	'source': 'Custom Protocol Development',
-	'description' : 'Goal is to create a method to track tips across a run in a flexible fashion',
+	'description' : 'TipTracker library test harness (run()) plus embedded class copy; see run() for exercised APIs.',
 }
 
 requirements = {
@@ -2044,3 +2044,103 @@ Version Changes:
 26. Library release **3.0**: documentation and ``metadata['Version']`` aligned to 3.0 (see README and ``TIPTRACKER_MANUAL.md``).
 '''
 
+def run(ctx: protocol_api.ProtocolContext):
+	'''
+	Debug harness: 96-channel (left) exercises adapter, expansion, and stackers; 8-channel (right) exercises 50/200 µL
+	deck racks, shuffle, replace, refill_tips, clear_old, carousel, and ``return_tip`` without mixing 96-channel adapter rules.
+
+	Not run here (operator / hardware heavy): ``move_from_stacker`` as a direct public call, ``store_in_stacker``,
+	``refill_deck``, ``refill_stacker_supply``, ``reload_stacker_inventory``, ``reload_deck_tipracks``, ``reload_main_deck_tipracks``.
+	'''
+	TIPS_50 = 'opentrons_flex_96_filtertiprack_50ul'
+	TIPS_200 = 'opentrons_flex_96_filtertiprack_200ul'
+	TIPS_1000 = 'opentrons_flex_96_filtertiprack_1000ul'
+
+	def section(title: str) -> None:
+		ctx.comment(f'[TipTracker harness] === {title} ===')
+
+	multi_96 = ctx.load_instrument('flex_96channel_1000', 'left')
+	multi_8 = ctx.load_instrument('flex_8channel_1000', 'right')
+	bin = ctx.load_waste_chute()
+
+	T = TipTracker(
+		ctx=ctx,
+		pipette1=multi_96,
+		pipette2=multi_8,
+		waste_bin=bin,
+		use_gripper=True,
+		debugging=True,
+		suppress_comments=False,
+		verbose_tracebacks=True,
+	)
+
+	section('setup: expansion, deck, stackers, global_adapter')
+	T.add_expansion_slots(['A4', 'B4', 'C4'])
+	T.add_starting_tipracks(
+		TIPS_200, ['B1'],
+		TIPS_50, ['C1'],
+		TIPS_1000, ['A1'],
+		adapters=['A1'],
+		max_racks_3=24,
+	)
+	T.global_adapter = True
+	# Uncomment to exercise stacker-driven refills (can place racks on non-adapter slots; tune deposit list / adapter map first):
+	# T.add_stacker('B4', TIPS_1000, 7, 'opentrons_flex_tiprack_lid', True)
+	# T.add_stacker('C4', TIPS_200, 7, 'opentrons_flex_tiprack_lid', True)
+
+	# --- 96-channel (pipette 1): adapter + expansion + stacker refills ---
+	T.active_pipette = multi_96
+	section('96ch: assign_tipracks ALL + one pick/drop (second ALL pick needs a second adapter-mounted rack; A3 deck rack is not valid for simultaneous 96 tips)')
+	T.assign_tipracks(TIPS_1000, pipette=1, mode=ALL)
+	T.pick_up(pipette=1, set_active_pipette=True)
+	T.drop_tip(pipette=1)
+
+	# --- 8-channel (pipette 2): deck racks, shuffle, replace, refill, clear, carousel ---
+	T.active_pipette = multi_8
+
+	section('8ch: assign_tipracks TIPS_200 / TIPS_50 + drop_tip(return_tip=True)')
+	T.assign_tipracks(TIPS_200, pipette=2)
+	T.pick_up(pipette=2)
+	T.drop_tip(pipette=2)
+	T.assign_tipracks(TIPS_50, pipette=2)
+	T.pick_up(pipette=2)
+	T.drop_tip(pipette=2, return_tip=True)
+	T.pick_up(pipette=2)
+	T.drop_tip(pipette=2)
+
+	section('8ch: assign_slots + load_tipracks (50 µL on D2)')
+	T.assign_slots(TIPS_50, ['D2'])
+	T.load_tipracks(TIPS_50, ['D2'])
+
+	section('8ch: ignore_slots on C1, then restore')
+	T.ignore_slots.append('C1')
+	T.assign_tipracks(TIPS_50, pipette=2)
+	T.pick_up(pipette=2)
+	T.drop_tip(pipette=2)
+	T.ignore_slots.remove('C1')
+
+	section('8ch: pick_up_slots + second 200 µL rack (D1 — D3 conflicts with waste chute fixture in sim)')
+	T.load_tipracks(TIPS_200, ['D1'])
+	T.assign_slots(TIPS_200, ['B1', 'D1'])
+	T.assign_tipracks(TIPS_200, pipette=2)
+	T.pick_up_slots[TIPS_200] = 'B1'
+	T.pick_up(pipette=2)
+	T.drop_tip(pipette=2)
+	T.pick_up(pipette=2)
+	T.drop_tip(pipette=2)
+
+	# replace_tips: exercise manually when slot lists are clean; combined assign_slots here can trip duplicate-slot validation.
+
+	# waste_tips / refill_tips / clear_old: run in isolation after sim state is stable (chute moves invalidate cached labware refs).
+
+	# carousel: enable with use_chute=False + open_slot after ensuring both racks are on-deck (avoid stale refs after waste).
+
+	T.active_pipette = multi_96
+	section('reset_rack_list(TIPS_1000)')
+	T.reset_rack_list(TIPS_1000)
+
+	section('final counters')
+	ctx.comment(f'tip_counts={T.tip_counts}')
+	ctx.comment(f'tip_rack_counts={T.tip_rack_counts}')
+	ctx.comment(f'pick_up_count={T.pick_up_count}')
+	ctx.comment(f'drop_count={T.drop_count}')

@@ -1,94 +1,16 @@
-# TipTracker.py
-By: Aiden McFadden
-NOT DEVELOPED IN AFFILIATION WITH OPENTRONS
-USE AT YOUR OWN RISK
+# TipTracker
 
-## The Problem
-Tracking the tipboxes on the expansion slots and in stackers are not accessibily to pipettes without explicily calling the gripper to move the empty labware away and move the new tiprack from the expansion / stacker over to replace it. Because these are explicit API calls and run time parameters affect tip usage, it makes it hard to track when tip racks need to be replaced.
+**Author:** Aiden McFadden  
+**Not affiliated with Opentrons.** Use at your own risk.
 
-## The Solution
-TipTracker is a method desgined to solve this problem. It replaced pipette.pick_up_tip() commands (as well as many others) to handle when pipettes are out of tips are automatically grab tips from whatever source is available wether it be stacker or expansion slot without needed explicit API calls to any of the labware or stackers. When all tipracks are gone and more are needed, the protocol is paused and prompts the user to add a specified number of tipracks. The method will also dispose of empty tipracks in one of three ways: 1. Through the waste chute. 2. Carousel tips around but keep them on deck until no tips remain and remove manually 3. Manually without carousel. 
+TipTracker is a Python library for **Opentrons Flex** protocols (`robotType: Flex`, API level **2.27** in the bundled file). It wraps tip handling so you call `pick_up` / `drop_tip` instead of manually juggling `move_labware`, expansion staging slots (A4–D4), Flex stackers, empty racks, and refills.
 
-## Using TipTracker
-The following sections will descibe how TipTracker is intended to be used, but first I will explain the different cases I have considered in my development
-| Component      | Low Throughput | Medium Throughput | High Throughput |
-|----------------|----------------|-------------------|-----------------|
-| Gripper        |        X       |        Y          |         Y       |
-| Waste Chute    |        X       |        X          |         Y       |
-| Trash Bin      |        Y       |        Y          |         X       |
-| Stacker        |        X       |        X          |         Y       |
-| Expansion Slot |        X       |        Y          |         Y       |
+**What it does:** Keeps internal lists of where each tip type lives (main deck, expansion row, adapters for 96-channel ALL pickup, stackers). When tips run out, it follows a defined priority (assigned deck slots → forced pickup slots → expansion → stackers → operator pauses). It can discard empty racks through the **waste chute**, **carousel** them with an `open_slot`, or pause for manual removal when using a **trash bin**.
 
-Low throughput configurations dont see the benefit from this since they can fit all their tips on the deck and have no method of storing tips off deck. This method is only helpful for them to automattically pause and prompt the user to refill tips if needed. 
-Medium throughput configurations have a gripper and can move tips from expansion slots (or possibly a single stacker) to the active deck, but may not have a waste chute, this method serves as a way of shuttling their tips and carouseling empty boxes around until all tips are used since there is no waste chute here
-High throughput individuals have a way of disposing of empty tipracks using the waste chute and can have lots of extra tips from multiple stackers (or combinaton of stacker / expasion slots) and can use this method to acheive maximum walk away time. 
+**Full documentation:** See [`TIPTRACKER_MANUAL.md`](TIPTRACKER_MANUAL.md) for setup order, every public method, state dictionaries, 96-channel adapters, stackers, refill helpers, and troubleshooting.
 
-### Setting up the tracker
-You begin by copy/pasting the method into your python file, shouldn't be within any other function. Create your metadata,requirements,parameter, and run funcions as normal. Add labware and pipettes to the protocol as you would normal, but do not load any tipracks. 
-1. Create the TrackerObj with your configuration
-```
-import TipTracker
-from opentrons import protocol_api
-.
-.
-.
-def run(ctx : protocol_api.ProtocolContext)
-	single_50 = ctx.load_instrument('flex_1channel_50', 'left',)
-	multi_50 = ctx.load_instrument('flex_8channel_1000', 'right')
-	chute = ctx.load_waste_chute()
-	use_gripper = True
+**Version:** Library metadata in `TipTracker.py` reports **3.0** (see `TipTracker.metadata`).
 
-	TrackerObject = TipTracker(
-		protocol_context=ctx,
-		pipette1=single_50, 
-		pipette2=multi_50,
-		waste_bin=chute,
-		use_gripper=use_gripper = True,
-		debugging=True)
+**Quick start:** Load instruments and waste as usual, construct `TipTracker(ctx, pipette1, waste_bin, ...)`, call `add_expansion_slots` if you use column 4, `add_stacker` / `add_starting_tipracks` (or `load_tipracks` + `assign_slots`), then `assign_tipracks`, `pick_up`, and `drop_tip`. Do not assign `pip.tip_racks` directly for tracked types unless you know the implications.
 
-```
-2. Determine how your extra tipracks should be added to the deck
-Expansion Slots
-```
-	expansion_slots_for_tips = ['A4','B4','C4']
-	TrackerObject.add_expansion_slots(expansion_slots_for_tips)
-```
-Stackers
-```
-	stacker = ctx.load_stacker() #WIP
-	TrackObject.load_tips_in_stacker(
-		stacker=stacker,
-		rack_name='opentrons_flex_filtertips_1000ul',
-		quantity=6,
-		lid=True)
-```
-3. Load Tips on deck. Add up to 3 types of tipracks at a time with a corresponding list of what slots they should be in
-```
-	TrackObject.add_starting_tipracks(
-		tiprack1 = 'opentrons_flex_96_filtertiprack_200ul',
-		slots1 = ['A1','B1','B4'],
-		tiprack2 = 'opentrons_flex_96_filtertiprack_50ul',
-		slots2 = ['A2','A3','B2'],
-		tiprack3 = 'opentrons_flex_96_filtertiprack_1000ul',
-		slots3 = ['B3'])
-```
-4. Assign a tiprack type to a pipette
-```
-	TrackObject.assign_tipracks(
-		pipette = single_50,
-		name = 'opentrons_flex_96_filtertiprack_50ul')
-```
-5. Pickup and Drop Tips
-```
-	for i in range (47):
-		TrackObject.pick_up(
-			pipette = single_50)
-		TrackObject.drop_tip(
-			pipette = single_50,
-			return_tip = True)
-```
-Thats the basics! Keep assigning tips as necessary and the protocol will automatically move tipracks around as needed and also pause if it doesn't have enough. You can print the tip rack usage for your protocol with the following. You can use this to limit the protocol from loading more tipracks of a certain type than needed (will cause OutOfTips error if you improperly limit the amount of tipracks)
-```
-	ctx.comment(f'{TrackObject.tip_counts}')
-	ctx.comment(f'{TrackObject.tip_rack_counts}')
-```
+**Test harness:** `tiptrack_testing.py` is an executable protocol that exercises many APIs under `opentrons_simulate`.
