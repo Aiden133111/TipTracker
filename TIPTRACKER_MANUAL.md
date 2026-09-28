@@ -1,6 +1,10 @@
 # TipTracker Library Manual
 
-This document describes the public behavior of **`TipTracker.py`**: the `TipTracker` class for Opentrons Flex protocols (**library version 3.0**, see `TipTracker.metadata['Version']`). It is written to match the implementation as closely as possible; when in doubt, the source docstrings in `TipTracker.py` are authoritative.
+This document describes the public behavior of the TipTracker `TipTracker` class for Opentrons Flex protocols. It is written to match the implementation as closely as possible; when in doubt, the source docstrings are authoritative.
+
+**Recommended library:** `tiptrackerV2/` (**version 4.1.1**, `from tiptrackerV2 import TipTracker`). V2 keeps the same public API as V1 and matches V1 behavior for global adapters, partial nozzle layouts, forced pickup (`refill_forced_pickup_rack`), and adapter reload, while using a `RefillSnapshot` / `DeckRegion` / `StackerSupply` refill architecture. Package overview: [`tiptrackerV2/README.md`](tiptrackerV2/README.md).
+
+**Legacy:** `TipTracker.py` (**version 3.0**) remains available as `from TipTracker import TipTracker`. Regression coverage: [`v2_regression_tests/`](v2_regression_tests/). Release notes: [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 
@@ -58,10 +62,16 @@ TipTracker is **not** validated or endorsed by Opentrons. Test with `opentrons_s
 
 **Options:**
 
-1. **Import** `TipTracker` from `TipTracker.py` if your upload path supports it (e.g. local simulate with `PYTHONPATH` or a single combined file on the robot).
-2. **Copy-paste** the class into your protocol file (common on-instrument). In that case, fatal errors can print a **call stack** to stderr when `verbose_tracebacks=True` (default), to help locate your protocol line.
+1. **Import V2 (recommended):** put the TipTracker repo root on `PYTHONPATH`, then `from tiptrackerV2 import TipTracker`.
+2. **Import V1 (legacy):** `from TipTracker import TipTracker` (module `TipTracker.py`).
+3. **Copy-paste** the class from `tiptrackerV2/tiptrackerV2.py` (or `TipTracker.py`) into your protocol file (common on-instrument). Fatal errors can print a **call stack** to stderr when `verbose_tracebacks=True` (default), to help locate your protocol line.
 
-The test harness `tiptrack_testing.py` embeds a full copy of the class for self-contained simulation.
+```bash
+export PYTHONPATH="/path/to/TipTracker:${PYTHONPATH}"
+opentrons_simulate /path/to/my_protocol.py
+```
+
+The test harness `tiptrack_testing.py` embeds a full copy of the V1 class for self-contained simulation. V2 scenarios live in `v2_regression_tests/`.
 
 ---
 
@@ -351,11 +361,15 @@ Per stacker: pause, then **`load_tips_in_stacker`** for proactive inventory refr
 
 ## 18. Related files
 
-| File | Purpose |
-|------|---------|
-| `TipTracker.py` | Canonical library implementation. |
-| `tiptrack_testing.py` | Embedded class copy + `run()` harness protocol for simulation. |
-| `stacker_example.py` / `stacker_testing880.py` | Additional examples (if present in your checkout). |
+| File / folder | Purpose |
+|---------------|---------|
+| `tiptrackerV2/` | **Recommended** library (4.1.1). See `tiptrackerV2/README.md`. |
+| `TipTracker.py` | Legacy V1 library (3.0). |
+| `TIPTRACKER_MANUAL.md` | This manual (API + cookbook). |
+| `CHANGELOG.md` | Release history. |
+| `v2_regression_tests/` | V1/V2 simulate regression protocols. |
+| `tiptrack_testing.py` | Embedded V1 class copy + `run()` harness for simulation. |
+| `skills/opentrons-tiptracker-mcp/` | Cursor skill + example Flex protocols. |
 
 ---
 
@@ -846,15 +860,16 @@ Normally **`pick_up_slots`** triggers this internally; you can call it when buil
 tracker.shuffle_for_forced_pickup(TIPS_200, pick_up_slot='B1', pipette=pip)
 ```
 
-### 19.45 Import `TipTracker` from a sibling file (simulate / dev)
+### 19.45 Import TipTracker (simulate / dev)
 
 ```bash
-export PYTHONPATH="/path/to/folder_containing_TipTracker.py:${PYTHONPATH}"
+export PYTHONPATH="/path/to/TipTracker:${PYTHONPATH}"
 opentrons_simulate /path/to/my_protocol.py
 ```
 
 ```python
-from TipTracker import TipTracker  # module name follows your filename
+from tiptrackerV2 import TipTracker          # recommended (4.1.1)
+# from TipTracker import TipTracker          # legacy V1 (3.0)
 ```
 
 ### 19.46 Embed the class in one file (`verbose_tracebacks=True`)
